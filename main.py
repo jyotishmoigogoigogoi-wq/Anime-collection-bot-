@@ -25,8 +25,6 @@ import uvicorn
 
 load_dotenv()
 
-import os
-
 # ---------- Configuration ----------
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
@@ -75,13 +73,22 @@ class Database:
                     PRIMARY KEY (user_id, group_id)
                 )
             ''')
-            # Global user data (coins + cooldowns shared across all groups)
+            # Global user data — coins only (shared across all groups)
             await conn.execute('''
                 CREATE TABLE IF NOT EXISTS global_users (
                     user_id BIGINT PRIMARY KEY,
-                    coins INT DEFAULT 0,
-                    last_daily TIMESTAMP,
-                    last_claim TIMESTAMP
+                    coins INT DEFAULT 0
+                )
+            ''')
+            # Per-group user cooldowns (daily + claim are separate per group/DM)
+            # group_id = 0 means private/DM chat
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS group_user_data (
+                    user_id  BIGINT,
+                    group_id BIGINT,
+                    last_daily  TIMESTAMP,
+                    last_claim  TIMESTAMP,
+                    PRIMARY KEY (user_id, group_id)
                 )
             ''')
             # Characters global
@@ -128,16 +135,6 @@ class Database:
                     emoji TEXT
                 )
             ''')
-            
-            await conn.execute('''
-               CREATE TABLE IF NOT EXISTS user_group_data (
-                    user_id BIGINT,
-                    group_id BIGINT,
-                    last_daily TIMESTAMP,
-                    last_claim TIMESTAMP,
-                    PRIMARY KEY (user_id, group_id)
-                )
-            ''')
             # Insert default rarities
             await conn.executemany('''
                 INSERT INTO rarity_ranking (rarity, tier, emoji)
@@ -165,7 +162,11 @@ class Database:
 
     async def set_group_welcome_img(self, group_id: int, file_id: str):
         async with self.pool.acquire() as conn:
-            await conn.execute('INSERT INTO groups (group_id, welcome_img_id) VALUES ($1, $2) ON CONFLICT (group_id) DO UPDATE SET welcome_img_id = $2', group_id, file_id)
+            await conn.execute(
+                'INSERT INTO groups (group_id, welcome_img_id) VALUES ($1, $2) '
+                'ON CONFLICT (group_id) DO UPDATE SET welcome_img_id = $2',
+                group_id, file_id
+            )
 
     async def get_last_calladmins(self, group_id: int) -> Optional[datetime]:
         async with self.pool.acquire() as conn:
@@ -173,9 +174,13 @@ class Database:
 
     async def update_calladmins_time(self, group_id: int):
         async with self.pool.acquire() as conn:
-            await conn.execute('INSERT INTO groups (group_id, last_calladmins) VALUES ($1, NOW()) ON CONFLICT (group_id) DO UPDATE SET last_calladmins = NOW()', group_id)
+            await conn.execute(
+                'INSERT INTO groups (group_id, last_calladmins) VALUES ($1, NOW()) '
+                'ON CONFLICT (group_id) DO UPDATE SET last_calladmins = NOW()',
+                group_id
+            )
 
-    # ---- Global user data (coins + cooldowns, shared across all groups) ----
+    # ---- Global coins (shared across all groups) ----
     async def get_user_coins(self, user_id: int) -> int:
         async with self.pool.acquire() as conn:
             val = await conn.fetchval('SELECT coins FROM global_users WHERE user_id = $1', user_id)
@@ -195,74 +200,44 @@ class Database:
                 ON CONFLICT (user_id) DO UPDATE SET coins = GREATEST(0, global_users.coins - $2)
             ''', user_id, amount)
 
-    async def can_claim_daily(self, user_id: int) -> bool:
+    # ---- Per-group daily cooldown ----
+    # group_id = 0 for private/DM chats → DMs have their own separate cooldown slot
+    async def can_claim_daily(self, user_id: int, group_id: int) -> bool:
         async with self.pool.acquire() as conn:
-            last = await conn.fetchval('SELECT last_daily FROM global_users WHERE user_id = $1', user_id)
-            if not last: return True
-            return (datetime.utcnow() - last).total_seconds() >= 7200
-            
-    # ---- Per Group Cooldowns ----
+            last = await conn.fetchval(
+                'SELECT last_daily FROM group_user_data WHERE user_id = $1 AND group_id = $2',
+                user_id, group_id
+            )
+            if not last:
+                return True
+            return (datetime.utcnow() - last).total_seconds() >= 7200  # 2 hours
 
-async def can_claim_daily(self, user_id: int, group_id: int):
-    async with self.pool.acquire() as conn:
-        last = await conn.fetchval(
-            'SELECT last_daily FROM user_group_data WHERE user_id=$1 AND group_id=$2',
-            user_id, group_id
-        )
-        if not last:
-            return True
-        return (datetime.utcnow() - last).total_seconds() >= 7200
-
-
-async def record_daily(self, user_id: int, group_id: int):
-    async with self.pool.acquire() as conn:
-        await conn.execute('''
-            INSERT INTO user_group_data (user_id, group_id, last_daily)
-            VALUES ($1, $2, NOW())
-            ON CONFLICT (user_id, group_id)
-            DO UPDATE SET last_daily = NOW()
-        ''', user_id, group_id)
-
-
-async def can_claim_character(self, user_id: int, group_id: int):
-    async with self.pool.acquire() as conn:
-        last = await conn.fetchval(
-            'SELECT last_claim FROM user_group_data WHERE user_id=$1 AND group_id=$2',
-            user_id, group_id
-        )
-        if not last:
-            return True
-        return (datetime.utcnow() - last).total_seconds() >= 39600
-
-
-async def record_claim(self, user_id: int, group_id: int):
-    async with self.pool.acquire() as conn:
-        await conn.execute('''
-            INSERT INTO user_group_data (user_id, group_id, last_claim)
-            VALUES ($1, $2, NOW())
-            ON CONFLICT (user_id, group_id)
-            DO UPDATE SET last_claim = NOW()
-        ''', user_id, group_id)
-
-    async def record_daily(self, user_id: int):
+    async def record_daily(self, user_id: int, group_id: int):
         async with self.pool.acquire() as conn:
             await conn.execute('''
-                INSERT INTO global_users (user_id, last_daily) VALUES ($1, NOW())
-                ON CONFLICT (user_id) DO UPDATE SET last_daily = NOW()
-            ''', user_id)
+                INSERT INTO group_user_data (user_id, group_id, last_daily)
+                VALUES ($1, $2, NOW())
+                ON CONFLICT (user_id, group_id) DO UPDATE SET last_daily = NOW()
+            ''', user_id, group_id)
 
-    async def can_claim_character(self, user_id: int) -> bool:
+    # ---- Per-group claim cooldown ----
+    async def can_claim_character(self, user_id: int, group_id: int) -> bool:
         async with self.pool.acquire() as conn:
-            last = await conn.fetchval('SELECT last_claim FROM global_users WHERE user_id = $1', user_id)
-            if not last: return True
-            return (datetime.utcnow() - last).total_seconds() >= 39600  # 11h
+            last = await conn.fetchval(
+                'SELECT last_claim FROM group_user_data WHERE user_id = $1 AND group_id = $2',
+                user_id, group_id
+            )
+            if not last:
+                return True
+            return (datetime.utcnow() - last).total_seconds() >= 39600  # 11 hours
 
-    async def record_claim(self, user_id: int):
+    async def record_claim(self, user_id: int, group_id: int):
         async with self.pool.acquire() as conn:
             await conn.execute('''
-                INSERT INTO global_users (user_id, last_claim) VALUES ($1, NOW())
-                ON CONFLICT (user_id) DO UPDATE SET last_claim = NOW()
-            ''', user_id)
+                INSERT INTO group_user_data (user_id, group_id, last_claim)
+                VALUES ($1, $2, NOW())
+                ON CONFLICT (user_id, group_id) DO UPDATE SET last_claim = NOW()
+            ''', user_id, group_id)
 
     async def get_user_char_count(self, user_id: int, group_id: int) -> int:
         async with self.pool.acquire() as conn:
@@ -275,7 +250,8 @@ async def record_claim(self, user_id: int, group_id: int):
     async def add_character(self, char_id: str, name: str, anime: str, img_url: str, rarity: str, price: int):
         async with self.pool.acquire() as conn:
             tier = await conn.fetchval('SELECT tier FROM rarity_ranking WHERE rarity = $1', rarity)
-            if tier is None: tier = 1
+            if tier is None:
+                tier = 1
             await conn.execute('''
                 INSERT INTO characters (char_id, name, anime, img_url, rarity, rarity_tier, price)
                 VALUES ($1, $2, $3, $4, $5, $6, $7)
@@ -286,14 +262,25 @@ async def record_claim(self, user_id: int, group_id: int):
             # Soft-delete: hides from market but keeps existing player inventories intact
             await conn.execute('UPDATE characters SET is_available = FALSE WHERE char_id = $1', char_id)
 
+    async def char_id_exists(self, char_id: str) -> bool:
+        """Check if a char_id exists regardless of is_available status (used for ID generation)."""
+        async with self.pool.acquire() as conn:
+            return await conn.fetchval(
+                'SELECT 1 FROM characters WHERE char_id = $1', char_id
+            ) is not None
+
     async def get_character_by_id(self, char_id: str) -> Optional[dict]:
         async with self.pool.acquire() as conn:
-            row = await conn.fetchrow('SELECT * FROM characters WHERE char_id = $1 AND is_available = true', char_id)
+            row = await conn.fetchrow(
+                'SELECT * FROM characters WHERE char_id = $1 AND is_available = true', char_id
+            )
             return dict(row) if row else None
 
     async def character_exists(self, name: str, anime: str) -> bool:
         async with self.pool.acquire() as conn:
-            return await conn.fetchval('SELECT 1 FROM characters WHERE name = $1 AND anime = $2', name, anime) is not None
+            return await conn.fetchval(
+                'SELECT 1 FROM characters WHERE name = $1 AND anime = $2', name, anime
+            ) is not None
 
     async def search_characters(self, query: str) -> List[dict]:
         async with self.pool.acquire() as conn:
@@ -306,7 +293,9 @@ async def record_claim(self, user_id: int, group_id: int):
 
     async def get_random_character(self) -> Optional[dict]:
         async with self.pool.acquire() as conn:
-            row = await conn.fetchrow('SELECT * FROM characters WHERE is_available = true ORDER BY RANDOM() LIMIT 1')
+            row = await conn.fetchrow(
+                'SELECT * FROM characters WHERE is_available = true ORDER BY RANDOM() LIMIT 1'
+            )
             return dict(row) if row else None
 
     async def get_random_unowned_character(self, user_id: int, group_id: int) -> Optional[dict]:
@@ -327,23 +316,35 @@ async def record_claim(self, user_id: int, group_id: int):
     async def add_to_inventory(self, user_id: int, group_id: int, char_id: str) -> bool:
         async with self.pool.acquire() as conn:
             try:
-                await conn.execute('INSERT INTO inventory (user_id, group_id, char_id) VALUES ($1, $2, $3)', user_id, group_id, char_id)
+                await conn.execute(
+                    'INSERT INTO inventory (user_id, group_id, char_id) VALUES ($1, $2, $3)',
+                    user_id, group_id, char_id
+                )
                 return True
             except asyncpg.UniqueViolationError:
                 return False
 
     async def remove_from_inventory(self, user_id: int, group_id: int, char_id: str) -> bool:
         async with self.pool.acquire() as conn:
-            result = await conn.execute('DELETE FROM inventory WHERE user_id = $1 AND group_id = $2 AND char_id = $3', user_id, group_id, char_id)
+            result = await conn.execute(
+                'DELETE FROM inventory WHERE user_id = $1 AND group_id = $2 AND char_id = $3',
+                user_id, group_id, char_id
+            )
             return result != "DELETE 0"
 
     async def user_owns_character(self, user_id: int, group_id: int, char_id: str) -> bool:
         async with self.pool.acquire() as conn:
-            return await conn.fetchval('SELECT 1 FROM inventory WHERE user_id = $1 AND group_id = $2 AND char_id = $3', user_id, group_id, char_id) is not None
+            return await conn.fetchval(
+                'SELECT 1 FROM inventory WHERE user_id = $1 AND group_id = $2 AND char_id = $3',
+                user_id, group_id, char_id
+            ) is not None
 
     async def get_user_inventory(self, user_id: int, group_id: int, limit: int = 7, offset: int = 0) -> Tuple[List[dict], int]:
         async with self.pool.acquire() as conn:
-            total = await conn.fetchval('SELECT COUNT(*) FROM inventory WHERE user_id = $1 AND group_id = $2', user_id, group_id)
+            total = await conn.fetchval(
+                'SELECT COUNT(*) FROM inventory WHERE user_id = $1 AND group_id = $2',
+                user_id, group_id
+            )
             rows = await conn.fetch('''
                 SELECT c.char_id, c.name, c.anime, c.img_url, c.rarity, c.price, c.rarity_tier
                 FROM inventory i JOIN characters c ON i.char_id = c.char_id
@@ -370,7 +371,10 @@ async def record_claim(self, user_id: int, group_id: int):
 
     async def set_start_video(self, file_id: str):
         async with self.pool.acquire() as conn:
-            await conn.execute('INSERT INTO bot_config (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = $2', 'start_video', file_id)
+            await conn.execute(
+                'INSERT INTO bot_config (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = $2',
+                'start_video', file_id
+            )
 
     async def get_rarity_emoji(self, rarity: str) -> str:
         async with self.pool.acquire() as conn:
@@ -379,27 +383,6 @@ async def record_claim(self, user_id: int, group_id: int):
 
 db = Database()
 
-# ---------- Minimal Web Server for Render ----------
-from fastapi import FastAPI
-from fastapi.responses import HTMLResponse
-import uvicorn
-
-web_app = FastAPI()
-
-@web_app.get("/")
-async def root():
-    return HTMLResponse("<h1>Bot is running ✅</h1><p>Telegram bot is active.</p>")
-
-@web_app.get("/health")
-async def health_check():
-    return {"status": "alive"}
-
-@web_app.get("/api/characters")
-async def api_characters():
-    chars, _ = await db.get_market_characters(limit=500, offset=0)
-    return [{"char_id": c["char_id"], "name": c["name"], "anime": c["anime"],
-             "img_url": c["img_url"], "rarity": c["rarity"], "price": c["price"]} for c in chars]
-    
 # ---------- Helper Functions ----------
 def is_owner(user_id: int) -> bool:
     return user_id == OWNER_ID
@@ -413,19 +396,16 @@ async def ensure_started(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return False
     return True
 
-def get_group_id(update: Update) -> int:
-    chat = update.effective_chat
-    if chat.type in ["group", "supergroup"]:
-        return chat.id
-    return 0  # private chat, no group-specific data
-
 def get_effective_group_id(update: Update) -> int:
-    # For commands that need group context (like /buy), use group if in group, else 0 (global? but we separate per group)
+    """
+    Returns the group_id for data segregation.
+    Groups/supergroups  → their own chat.id
+    Private/DM chats    → 0  (treated as a separate 'private' slot)
+    """
     chat = update.effective_chat
     if chat.type in ["group", "supergroup"]:
         return chat.id
-    return update.effective_user.id # private chats have no group, but we can treat as group 0? But spec says per group separated, so private chat maybe not allowed for collection? We'll allow but store under group_id=0.
-    # Simpler: allow commands only in groups? But user may want to use in private. We'll store under group_id=0 for private.
+    return 0  # private chat — all DMs share group_id=0
 
 async def format_character_card(char: dict, emoji: str) -> str:
     return (
@@ -444,34 +424,35 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     video_id = await db.get_start_video()
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("➕ Add To Group", url=f"https://t.me/{context.bot.username}?startgroup=true")],
-        [InlineKeyboardButton("Owner 🤪", url=OWNER_LINK),   # ✅ uses OWNER_LINK from config
-         InlineKeyboardButton("Support chat 💝", url=SUPPORT_LINK)]
+        # BUG FIX: was f"https://{OWNER_USERNAME}" → now correctly uses OWNER_LINK
+        [InlineKeyboardButton("Owner 🤪", url=OWNER_LINK), InlineKeyboardButton("Support chat 💝", url=SUPPORT_LINK)]
     ])
-    caption = "Welcome to Anime Character Collector Bot!\nUse /help to see commands."
-
-    try:
-        if video_id:
-            await update.message.reply_video(video_id, caption=caption, reply_markup=keyboard)
-        else:
-            raise Exception("no video")
-    except Exception:
-        # Fallback to text if video fails or doesn't exist
-        await update.message.reply_text(caption, reply_markup=keyboard)
+    if video_id:
+        await update.message.reply_video(
+            video_id,
+            caption="Welcome to Anime Character Collector Bot!\nUse /help to see commands.",
+            reply_markup=keyboard
+        )
+    else:
+        await update.message.reply_text(
+            "Welcome to Anime Character Collector Bot!\nUse /help to see commands.",
+            reply_markup=keyboard
+        )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = """🎮 *Available Commands*
 
 *💰 Economy*
-/daily - Claim coins (every 2h)
-/claim - Claim random character (every 11h)
+/daily - Claim coins (every 2h, per group)
+/claim - Claim random character (every 11h, per group)
 /wallet - Show your coins
 
 *📦 Collection*
-/vault - Your collected characters
+/vault - Your collected characters (per group)
 /market - View buyable characters
 /buy <id> [id2 ...] - Buy character(s)
 /sell <id> - Sell character (70% refund)
-/search <name> - Search characters
+/search <n> - Search characters
 
 *👥 Group Admin*
 /listadmins - List human admins
@@ -495,48 +476,44 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     group_id = get_effective_group_id(update)
-
     if not await ensure_started(update, context):
         return
-
+    # Cooldown is now per group (group_id=0 for DMs)
     if await db.can_claim_daily(user.id, group_id):
         reward = random.randint(50, 200)
         await db.add_coins(user.id, reward)
         await db.record_daily(user.id, group_id)
-
         coins = await db.get_user_coins(user.id)
-
         await update.message.reply_text(
             f"💸 You claimed *{reward} coins*!\n💰 Total balance: `{coins}` coins",
             parse_mode="Markdown"
         )
     else:
-        await update.message.reply_text(
-            "⏳ You already claimed daily coins in this chat. Try again later."
-        )
+        await update.message.reply_text("⏳ You already claimed daily coins here. Try again in 2 hours.")
 
 async def claim(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     group_id = get_effective_group_id(update)
-    if not await ensure_started(update, context): return
+    if not await ensure_started(update, context):
+        return
+    # Cooldown is now per group (group_id=0 for DMs)
     if not await db.can_claim_character(user.id, group_id):
-        await update.message.reply_text("You already claimed a character in this chat. Try again later.")
+        await update.message.reply_text("⏳ You already claimed a character here. Try again in 11 hours.")
         return
 
     char = await db.get_random_unowned_character(user.id, group_id)
 
     if char is None:
-        # Check if the market has any characters at all
         any_char = await db.get_random_character()
         if not any_char:
             await update.message.reply_text("❌ No characters available. Contact the owner.")
             return
-        # User owns every available character — reward coins
+        # User owns every available character in this group — reward coins
         await db.add_coins(user.id, 10000)
         await db.record_claim(user.id, group_id)
         coins = await db.get_user_coins(user.id)
         await update.message.reply_text(
-            "🏆 *You own every character in the collection!*\n\n"
+            "🏆 *You own every character in this group's collection!*\n\n"
             "╭───────────────╮\n"
             "💰 *Reward:* +10,000 Coins\n"
             f"👜 *Balance:* {coins:,} Coins\n"
@@ -571,14 +548,15 @@ async def claim(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     group_id = get_effective_group_id(update)
-    if not await ensure_started(update, context): return
+    if not await ensure_started(update, context):
+        return
     coins = await db.get_user_coins(user.id)
     char_count = await db.get_user_char_count(user.id, group_id)
     text = (
         f"👤 *{user.first_name}'s Wallet*\n"
         f"━━━━━━━━━━━━━━━━\n"
-        f"💰 *Coins:* `{coins:,}`\n"
-        f"🎴 *Characters:* `{char_count}`\n"
+        f"💰 *Coins:* `{coins:,}` _(global)_\n"
+        f"🎴 *Characters here:* `{char_count}`\n"
         f"━━━━━━━━━━━━━━━━\n"
         f"_/daily to earn coins • /vault to see collection_"
     )
@@ -590,7 +568,7 @@ async def send_vault_page(target, user_id: int, group_id: int, page: int, send_n
     total_pages = max(1, total)
 
     if not items:
-        text = "📭 Your vault is empty. Use /claim or /buy to get characters!"
+        text = "📭 Your vault is empty here. Use /claim or /buy to get characters!"
         if send_new:
             await target.reply_text(text)
         else:
@@ -624,7 +602,6 @@ async def send_vault_page(target, user_id: int, group_id: int, page: int, send_n
         except Exception:
             await target.reply_text(caption, parse_mode="Markdown", reply_markup=keyboard)
     else:
-        # Edit in place: swap the photo and caption together
         try:
             await target.edit_media(
                 media=InputMediaPhoto(media=char['img_url'], caption=caption, parse_mode="Markdown"),
@@ -639,7 +616,8 @@ async def send_vault_page(target, user_id: int, group_id: int, page: int, send_n
 async def vault(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     group_id = get_effective_group_id(update)
-    if not await ensure_started(update, context): return
+    if not await ensure_started(update, context):
+        return
     page = int(context.args[0]) if context.args and context.args[0].isdigit() else 1
     await send_vault_page(update.message, user.id, group_id, page, send_new=True)
 
@@ -650,7 +628,6 @@ async def vault_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     parts = query.data.split(":")
     user_id, group_id, page = int(parts[1]), int(parts[2]), int(parts[3])
-    # Only the vault owner can navigate their own vault
     if update.effective_user.id != user_id:
         await query.answer("⛔ This is not your vault!", show_alert=True)
         return
@@ -658,7 +635,7 @@ async def vault_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await send_vault_page(query.message, user_id, group_id, page, send_new=False)
 
 async def send_market_page(target, page: int, send_new: bool = True):
-    """Render one page of the market. target is a Message (send_new=True) or Message from callback (send_new=False)."""
+    """Render one page of the market."""
     PER_PAGE = 5
     offset = (page - 1) * PER_PAGE
     items, total = await db.get_market_characters(PER_PAGE, offset)
@@ -694,22 +671,17 @@ async def send_market_page(target, page: int, send_new: bool = True):
     else:
         await target.edit_text(text, parse_mode="Markdown", reply_markup=keyboard)
 
-# Web store URL for /market button
-WEB_STORE_URL = "https://anime-html-fsyc.vercel.app"
+WEB_STORE_URL = os.getenv("WEB_STORE_URL", "https://your-vercel-app.vercel.app")
 
 async def market(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show market in bot + web store button"""
-    # Send web store button first
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("🌐 Open Web Store", url=WEB_STORE_URL)],
     ])
     await update.message.reply_text(
-        "🛒 *Character Market*\n"
-        "Browse in web store or use buttons below:",
+        "🛒 *Character Market*\nBrowse in web store or use buttons below:",
         parse_mode="Markdown",
         reply_markup=keyboard
     )
-    # Then show paginated list
     page = int(context.args[0]) if context.args and context.args[0].isdigit() else 1
     await send_market_page(update.message, page, send_new=True)
 
@@ -724,7 +696,8 @@ async def market_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     group_id = get_effective_group_id(update)
-    if not await ensure_started(update, context): return
+    if not await ensure_started(update, context):
+        return
     if not context.args:
         await update.message.reply_text("Usage: /buy <character_id> [id2 ...]")
         return
@@ -746,7 +719,6 @@ async def buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if total_cost > coins:
         await update.message.reply_text(f"❌ Insufficient coins. Need {total_cost}, you have {coins}.")
         return
-    # Deduct and add to inventory
     for char in bought:
         await db.remove_coins(user.id, char['price'])
         await db.add_to_inventory(user.id, group_id, char['char_id'])
@@ -758,7 +730,8 @@ async def buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def sell(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     group_id = get_effective_group_id(update)
-    if not await ensure_started(update, context): return
+    if not await ensure_started(update, context):
+        return
     if not context.args:
         await update.message.reply_text("Usage: /sell <character_id>")
         return
@@ -784,7 +757,7 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not results:
         await update.message.reply_text("No matching characters.")
         return
-    for char in results[:5]:  # limit to 5
+    for char in results[:5]:
         emoji = await db.get_rarity_emoji(char['rarity'])
         caption = await format_character_card(char, emoji)
         if char.get('img_url'):
@@ -818,7 +791,7 @@ async def addcharacter_img(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def addcharacter_rarity(update: Update, context: ContextTypes.DEFAULT_TYPE):
     rarity = update.message.text
-    valid = ['Common','Uncommon','Elite','Epic','Mythic','Waifu','Special Edition','Limited','Event','Legendary']
+    valid = ['Common', 'Uncommon', 'Elite', 'Epic', 'Mythic', 'Waifu', 'Special Edition', 'Limited', 'Event', 'Legendary']
     if rarity not in valid:
         await update.message.reply_text(f"Invalid rarity. Choose from: {', '.join(valid)}")
         return RARITY
@@ -829,17 +802,22 @@ async def addcharacter_rarity(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def addcharacter_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         price = int(update.message.text)
-    except:
+    except ValueError:
         await update.message.reply_text("Price must be a number.")
         return PRICE
-    # Generate unique random ID #0000-#9999
+    # BUG FIX: use char_id_exists() (ignores is_available) instead of get_character_by_id()
+    # to avoid collisions with soft-deleted IDs which would cause a PRIMARY KEY violation.
     while True:
-        rand_id = f"#{random.randint(0,9999):04d}"
-        if not await db.get_character_by_id(rand_id):
+        rand_id = f"#{random.randint(0, 9999):04d}"
+        if not await db.char_id_exists(rand_id):
             break
     await db.add_character(
-        rand_id, context.user_data['char_name'], context.user_data['char_anime'],
-        context.user_data['char_img'], context.user_data['char_rarity'], price
+        rand_id,
+        context.user_data['char_name'],
+        context.user_data['char_anime'],
+        context.user_data['char_img'],
+        context.user_data['char_rarity'],
+        price
     )
     await update.message.reply_text(f"✅ Character added with ID {rand_id}")
     return ConversationHandler.END
@@ -857,7 +835,7 @@ async def remove_character(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     char_id = context.args[0]
     await db.remove_character(char_id)
-    await update.message.reply_text(f"Removed {char_id} from market and inventories.")
+    await update.message.reply_text(f"Removed {char_id} from the market (existing inventories unaffected).")
 
 async def listchar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_owner(update.effective_user.id):
@@ -880,10 +858,9 @@ async def addcoins(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Reply to a user's message.")
         return
     target = update.message.reply_to_message.from_user
-    group_id = get_effective_group_id(update)
     try:
         amount = int(context.args[0])
-    except:
+    except (IndexError, ValueError):
         await update.message.reply_text("Usage: /addcoins <amount> (reply to user)")
         return
     await db.add_coins(target.id, amount)
@@ -897,10 +874,9 @@ async def removecoins(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Reply to a user.")
         return
     target = update.message.reply_to_message.from_user
-    group_id = get_effective_group_id(update)
     try:
         amount = int(context.args[0])
-    except:
+    except (IndexError, ValueError):
         await update.message.reply_text("Usage: /removecoins <amount> (reply)")
         return
     await db.remove_coins(target.id, amount)
@@ -940,10 +916,10 @@ async def resetgrpdata(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if chat.type not in ["group", "supergroup"]:
         await update.message.reply_text("Use in group.")
         return
-    # Delete all user data for this group
     async with db.pool.acquire() as conn:
         await conn.execute('DELETE FROM users WHERE group_id = $1', chat.id)
         await conn.execute('DELETE FROM inventory WHERE group_id = $1', chat.id)
+        await conn.execute('DELETE FROM group_user_data WHERE group_id = $1', chat.id)
     await update.message.reply_text("All user data reset for this group.")
 
 # Group admin commands
@@ -967,7 +943,6 @@ async def calladmins(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if chat.type not in ["group", "supergroup"]:
         await update.message.reply_text("Only in groups.")
         return
-    # Check rate limit
     last = await db.get_last_calladmins(chat.id)
     if last and (datetime.utcnow() - last).total_seconds() < 600:
         await update.message.reply_text("⏳ Rate limit: once per 10 minutes per group.")
@@ -977,9 +952,7 @@ async def calladmins(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not human_admins:
         await update.message.reply_text("No human admins to call.")
         return
-    mentions = []
-    for admin in human_admins:
-        mentions.append(f'<a href="tg://user?id={admin.id}">.</a>')
+    mentions = [f'<a href="tg://user?id={admin.id}">.</a>' for admin in human_admins]
     text = "Hey admins come fast 🙃\n" + "".join(mentions)
     await update.message.reply_text(text, parse_mode="HTML")
     await db.update_calladmins_time(chat.id)
@@ -992,7 +965,6 @@ async def welcome_new_members(update: Update, context: ContextTypes.DEFAULT_TYPE
     for member in update.message.new_chat_members:
         if member.is_bot:
             continue
-        # Clickable first name — shows the name, tapping opens their profile
         mention = f'<a href="tg://user?id={member.id}">{member.first_name}</a>'
         welcome_text = (
             f"👋 Welcome to <b>{chat.title}</b>, {mention}!\n"
@@ -1008,9 +980,169 @@ async def welcome_new_members(update: Update, context: ContextTypes.DEFAULT_TYPE
         else:
             await update.message.reply_text(welcome_text, parse_mode="HTML")
 
+# ---------- Web Preview (FastAPI) ----------
+HTML_TEMPLATE = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
+    <title>Anime Character Store</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            background: linear-gradient(145deg, #0b0b1a 0%, #1a1a2e 100%);
+            font-family: 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 20px;
+        }
+        .store-container { max-width: 500px; width: 100%; margin: 0 auto; }
+        .card {
+            background: rgba(20, 20, 40, 0.7);
+            backdrop-filter: blur(12px);
+            border-radius: 32px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 20px 35px -10px rgba(0,0,0,0.5);
+            border: 1px solid rgba(255,255,255,0.1);
+            transition: transform 0.2s ease;
+        }
+        .card:hover { transform: translateY(-5px); }
+        .character-img {
+            width: 100%; border-radius: 28px; object-fit: cover;
+            aspect-ratio: 1 / 1; background: #111;
+            box-shadow: 0 8px 20px rgba(0,0,0,0.3);
+        }
+        .info { margin-top: 16px; }
+        .name {
+            font-size: 1.8rem; font-weight: bold;
+            background: linear-gradient(135deg, #FFD966, #FF8C42);
+            -webkit-background-clip: text; background-clip: text;
+            color: transparent; margin-bottom: 6px;
+        }
+        .anime { font-size: 1rem; color: #ccc; margin-bottom: 8px; }
+        .rarity {
+            display: inline-block; background: rgba(255,215,0,0.2);
+            padding: 4px 12px; border-radius: 40px;
+            font-size: 0.8rem; font-weight: bold; margin-bottom: 12px;
+        }
+        .price { font-size: 1.3rem; font-weight: bold; color: #7CFC00; }
+        .id { font-family: monospace; font-size: 0.8rem; color: #aaa; margin-top: 8px; }
+        .slider-controls {
+            display: flex; justify-content: center;
+            gap: 20px; margin-top: 20px; margin-bottom: 20px;
+        }
+        button {
+            background: #2c2c54; border: none; color: white;
+            font-size: 1.5rem; padding: 10px 24px;
+            border-radius: 60px; cursor: pointer;
+            transition: all 0.2s; box-shadow: 0 4px 10px rgba(0,0,0,0.3);
+        }
+        button:active { transform: scale(0.96); }
+        .page-indicator { text-align: center; color: #aaa; margin-top: 10px; }
+        @media (max-width: 500px) { .name { font-size: 1.4rem; } .card { padding: 14px; } }
+    </style>
+</head>
+<body>
+<div class="store-container">
+    <div id="card-container" class="card-container"></div>
+    <div class="slider-controls">
+        <button id="prevBtn">◀</button>
+        <button id="nextBtn">▶</button>
+    </div>
+    <div class="page-indicator" id="pageIndicator"></div>
+</div>
+<script>
+    let characters = [];
+    let currentIndex = 0;
+    let container = document.getElementById('card-container');
+    let prevBtn = document.getElementById('prevBtn');
+    let nextBtn = document.getElementById('nextBtn');
+    let indicator = document.getElementById('pageIndicator');
+
+    function renderCard(index) {
+        let char = characters[index];
+        if (!char) return;
+        let rarityEmoji = {
+            'Common':'⚪','Uncommon':'🟢','Elite':'🔵','Epic':'🟣','Mythic':'🔴',
+            'Waifu':'💖','Special Edition':'✨','Limited':'⏳','Event':'🎉','Legendary':'🌟'
+        }[char.rarity] || '⭐';
+        container.innerHTML = `
+            <div class="card">
+                <img class="character-img" src="${char.img_url}" alt="${char.name}" loading="lazy">
+                <div class="info">
+                    <div class="name">${rarityEmoji} ${char.name}</div>
+                    <div class="anime">🎬 ${char.anime}</div>
+                    <div class="rarity">💎 ${char.rarity}</div>
+                    <div class="price">💰 ${char.price} coins</div>
+                    <div class="id">🆔 ${char.char_id}</div>
+                </div>
+            </div>`;
+        indicator.innerText = `Character ${currentIndex+1} of ${characters.length}`;
+    }
+
+    function loadCharacters() {
+        fetch('/api/characters')
+            .then(res => res.json())
+            .then(data => {
+                characters = data;
+                if (characters.length === 0) {
+                    container.innerHTML = '<div class="card"><div class="info">No characters available yet.</div></div>';
+                    prevBtn.disabled = true;
+                    nextBtn.disabled = true;
+                    indicator.innerText = '0 characters';
+                    return;
+                }
+                currentIndex = 0;
+                renderCard(0);
+            });
+    }
+
+    prevBtn.addEventListener('click', () => {
+        if (!characters.length) return;
+        currentIndex = (currentIndex - 1 + characters.length) % characters.length;
+        renderCard(currentIndex);
+    });
+    nextBtn.addEventListener('click', () => {
+        if (!characters.length) return;
+        currentIndex = (currentIndex + 1) % characters.length;
+        renderCard(currentIndex);
+    });
+    loadCharacters();
+</script>
+</body>
+</html>
+"""
+
+# FastAPI app
+app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+@app.get("/", response_class=HTMLResponse)
+async def store_page():
+    return HTML_TEMPLATE
+
+@app.get("/api/characters")
+async def api_characters():
+    chars, _ = await db.get_market_characters(limit=500, offset=0)
+    return [
+        {"char_id": c["char_id"], "name": c["name"], "anime": c["anime"],
+         "img_url": c["img_url"], "rarity": c["rarity"], "price": c["price"]}
+        for c in chars
+    ]
+
 # ---------- Main Entry Point ----------
 async def run_bot():
-    # Initialize DB and tables
     await db.connect()
     await db.init_tables()
 
@@ -1037,11 +1169,11 @@ async def run_bot():
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("addcharacter", addcharacter_start)],
         states={
-            NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, addcharacter_name)],
-            ANIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, addcharacter_anime)],
+            NAME:    [MessageHandler(filters.TEXT & ~filters.COMMAND, addcharacter_name)],
+            ANIME:   [MessageHandler(filters.TEXT & ~filters.COMMAND, addcharacter_anime)],
             IMG_URL: [MessageHandler(filters.TEXT & ~filters.COMMAND, addcharacter_img)],
-            RARITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, addcharacter_rarity)],
-            PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, addcharacter_price)],
+            RARITY:  [MessageHandler(filters.TEXT & ~filters.COMMAND, addcharacter_rarity)],
+            PRICE:   [MessageHandler(filters.TEXT & ~filters.COMMAND, addcharacter_price)],
         },
         fallbacks=[CommandHandler("cancel", cancel_add)],
     )
@@ -1057,27 +1189,25 @@ async def run_bot():
     # Welcome new members
     application.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome_new_members))
 
-    # Pagination callbacks (market + vault)
+    # Pagination callbacks
     application.add_handler(CallbackQueryHandler(market_callback, pattern=r'^mkt:'))
     application.add_handler(CallbackQueryHandler(vault_callback, pattern=r'^vlt:'))
 
-    # Start bot polling
     await application.initialize()
     await application.start()
     await application.updater.start_polling()
     print("Bot started...")
     return application
 
-async def main():
-    # Run bot
-    bot_task = asyncio.create_task(run_bot())
-    
-    # Run web server on Render's assigned PORT
+async def run_web():
     port = int(os.getenv("PORT", 8000))
-    config = uvicorn.Config(web_app, host="0.0.0.0", port=port, log_level="info")
+    config = uvicorn.Config(app, host="0.0.0.0", port=port, log_level="info")
     server = uvicorn.Server(config)
-    web_task = asyncio.create_task(server.serve())
-    
+    await server.serve()
+
+async def main():
+    bot_task = asyncio.create_task(run_bot())
+    web_task = asyncio.create_task(run_web())
     await asyncio.gather(bot_task, web_task)
 
 if __name__ == "__main__":
