@@ -128,6 +128,16 @@ class Database:
                     emoji TEXT
                 )
             ''')
+            
+            await conn.execute('''
+               CREATE TABLE IF NOT EXISTS user_group_data (
+                    user_id BIGINT,
+                    group_id BIGINT,
+                    last_daily TIMESTAMP,
+                    last_claim TIMESTAMP,
+                    PRIMARY KEY (user_id, group_id)
+                )
+            ''')
             # Insert default rarities
             await conn.executemany('''
                 INSERT INTO rarity_ranking (rarity, tier, emoji)
@@ -190,6 +200,49 @@ class Database:
             last = await conn.fetchval('SELECT last_daily FROM global_users WHERE user_id = $1', user_id)
             if not last: return True
             return (datetime.utcnow() - last).total_seconds() >= 7200
+            
+    # ---- Per Group Cooldowns ----
+
+async def can_claim_daily(self, user_id: int, group_id: int):
+    async with self.pool.acquire() as conn:
+        last = await conn.fetchval(
+            'SELECT last_daily FROM user_group_data WHERE user_id=$1 AND group_id=$2',
+            user_id, group_id
+        )
+        if not last:
+            return True
+        return (datetime.utcnow() - last).total_seconds() >= 7200
+
+
+async def record_daily(self, user_id: int, group_id: int):
+    async with self.pool.acquire() as conn:
+        await conn.execute('''
+            INSERT INTO user_group_data (user_id, group_id, last_daily)
+            VALUES ($1, $2, NOW())
+            ON CONFLICT (user_id, group_id)
+            DO UPDATE SET last_daily = NOW()
+        ''', user_id, group_id)
+
+
+async def can_claim_character(self, user_id: int, group_id: int):
+    async with self.pool.acquire() as conn:
+        last = await conn.fetchval(
+            'SELECT last_claim FROM user_group_data WHERE user_id=$1 AND group_id=$2',
+            user_id, group_id
+        )
+        if not last:
+            return True
+        return (datetime.utcnow() - last).total_seconds() >= 39600
+
+
+async def record_claim(self, user_id: int, group_id: int):
+    async with self.pool.acquire() as conn:
+        await conn.execute('''
+            INSERT INTO user_group_data (user_id, group_id, last_claim)
+            VALUES ($1, $2, NOW())
+            ON CONFLICT (user_id, group_id)
+            DO UPDATE SET last_claim = NOW()
+        ''', user_id, group_id)
 
     async def record_daily(self, user_id: int):
         async with self.pool.acquire() as conn:
@@ -371,7 +424,7 @@ def get_effective_group_id(update: Update) -> int:
     chat = update.effective_chat
     if chat.type in ["group", "supergroup"]:
         return chat.id
-    return 0  # private chats have no group, but we can treat as group 0? But spec says per group separated, so private chat maybe not allowed for collection? We'll allow but store under group_id=0.
+    return update.effective_user.id # private chats have no group, but we can treat as group 0? But spec says per group separated, so private chat maybe not allowed for collection? We'll allow but store under group_id=0.
     # Simpler: allow commands only in groups? But user may want to use in private. We'll store under group_id=0 for private.
 
 async def format_character_card(char: dict, emoji: str) -> str:
@@ -441,22 +494,33 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    if not await ensure_started(update, context): return
-    if await db.can_claim_daily(user.id):
+    group_id = get_effective_group_id(update)
+
+    if not await ensure_started(update, context):
+        return
+
+    if await db.can_claim_daily(user.id, group_id):
         reward = random.randint(50, 200)
         await db.add_coins(user.id, reward)
-        await db.record_daily(user.id)
+        await db.record_daily(user.id, group_id)
+
         coins = await db.get_user_coins(user.id)
-        await update.message.reply_text(f"💸 You claimed *{reward} coins*!\n💰 Total balance: `{coins}` coins", parse_mode="Markdown")
+
+        await update.message.reply_text(
+            f"💸 You claimed *{reward} coins*!\n💰 Total balance: `{coins}` coins",
+            parse_mode="Markdown"
+        )
     else:
-        await update.message.reply_text("⏳ You already claimed daily coins. Try again in 2 hours.")
+        await update.message.reply_text(
+            "⏳ You already claimed daily coins in this chat. Try again later."
+        )
 
 async def claim(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     group_id = get_effective_group_id(update)
     if not await ensure_started(update, context): return
-    if not await db.can_claim_character(user.id):
-        await update.message.reply_text("⏳ You already claimed a character. Try again in 11 hours.")
+    if not await db.can_claim_character(user.id, group_id):
+        await update.message.reply_text("You already claimed a character in this chat. Try again later.")
         return
 
     char = await db.get_random_unowned_character(user.id, group_id)
@@ -469,7 +533,7 @@ async def claim(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         # User owns every available character — reward coins
         await db.add_coins(user.id, 10000)
-        await db.record_claim(user.id)
+        await db.record_claim(user.id, group_id)
         coins = await db.get_user_coins(user.id)
         await update.message.reply_text(
             "🏆 *You own every character in the collection!*\n\n"
@@ -483,7 +547,7 @@ async def claim(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await db.add_to_inventory(user.id, group_id, char['char_id'])
-    await db.record_claim(user.id)
+    await db.record_claim(user.id, group_id)
     emoji = await db.get_rarity_emoji(char['rarity'])
 
     caption = (
