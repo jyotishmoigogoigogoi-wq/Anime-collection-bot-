@@ -326,7 +326,6 @@ class Database:
 
 db = Database()
 
-
 # ---------- Minimal Web Server for Render ----------
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
@@ -341,6 +340,12 @@ async def root():
 @web_app.get("/health")
 async def health_check():
     return {"status": "alive"}
+
+@web_app.get("/api/characters")
+async def api_characters():
+    chars, _ = await db.get_market_characters(limit=500, offset=0)
+    return [{"char_id": c["char_id"], "name": c["name"], "anime": c["anime"],
+             "img_url": c["img_url"], "rarity": c["rarity"], "price": c["price"]} for c in chars]
     
 # ---------- Helper Functions ----------
 def is_owner(user_id: int) -> bool:
