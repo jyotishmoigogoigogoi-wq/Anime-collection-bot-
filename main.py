@@ -367,16 +367,22 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     await db.register_start(user.id)
 
-    # Check if start video exists
     video_id = await db.get_start_video()
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("➕ Add To Group", url=f"https://t.me/{context.bot.username}?startgroup=true")],
-        [InlineKeyboardButton("Owner 🤪", url=f"https://{OWNER_USERNAME}"), InlineKeyboardButton("Support chat 💝", url=SUPPORT_LINK)]
+        [InlineKeyboardButton("Owner 🤪", url=OWNER_LINK),   # ✅ uses OWNER_LINK from config
+         InlineKeyboardButton("Support chat 💝", url=SUPPORT_LINK)]
     ])
-    if video_id:
-        await update.message.reply_video(video_id, caption="Welcome to Anime Character Collector Bot!\nUse /help to see commands.", reply_markup=keyboard)
-    else:
-        await update.message.reply_text("Welcome to Anime Character Collector Bot!\nUse /help to see commands.", reply_markup=keyboard)
+    caption = "Welcome to Anime Character Collector Bot!\nUse /help to see commands."
+
+    try:
+        if video_id:
+            await update.message.reply_video(video_id, caption=caption, reply_markup=keyboard)
+        else:
+            raise Exception("no video")
+    except Exception:
+        # Fallback to text if video fails or doesn't exist
+        await update.message.reply_text(caption, reply_markup=keyboard)
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = """🎮 *Available Commands*
@@ -604,7 +610,7 @@ async def send_market_page(target, page: int, send_new: bool = True):
         await target.edit_text(text, parse_mode="Markdown", reply_markup=keyboard)
 
 # Web store URL for /market button
-WEB_STORE_URL = os.getenv("WEB_STORE_URL", "https://your-vercel-app.vercel.app")
+WEB_STORE_URL = "https://anime-html-fsyc.vercel.app"
 
 async def market(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show market in bot + web store button"""
@@ -615,7 +621,7 @@ async def market(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🛒 *Character Market*\n"
         "Browse in web store or use buttons below:",
-        parse_mode="MarkdownV2",
+        parse_mode="Markdown",
         reply_markup=keyboard
     )
     # Then show paginated list
@@ -917,223 +923,6 @@ async def welcome_new_members(update: Update, context: ContextTypes.DEFAULT_TYPE
         else:
             await update.message.reply_text(welcome_text, parse_mode="HTML")
 
-# ---------- Web Preview (FastAPI) ----------
-# Embedded HTML template as string
-HTML_TEMPLATE = """
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
-    <title>Anime Character Store</title>
-    <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
-        body {
-            background: linear-gradient(145deg, #0b0b1a 0%, #1a1a2e 100%);
-            font-family: 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
-            min-height: 100vh;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            padding: 20px;
-        }
-        .store-container {
-            max-width: 500px;
-            width: 100%;
-            margin: 0 auto;
-        }
-        .card {
-            background: rgba(20, 20, 40, 0.7);
-            backdrop-filter: blur(12px);
-            border-radius: 32px;
-            padding: 20px;
-            margin-bottom: 20px;
-            box-shadow: 0 20px 35px -10px rgba(0,0,0,0.5);
-            border: 1px solid rgba(255,255,255,0.1);
-            transition: transform 0.2s ease;
-        }
-        .card:hover {
-            transform: translateY(-5px);
-        }
-        .character-img {
-            width: 100%;
-            border-radius: 28px;
-            object-fit: cover;
-            aspect-ratio: 1 / 1;
-            background: #111;
-            box-shadow: 0 8px 20px rgba(0,0,0,0.3);
-        }
-        .info {
-            margin-top: 16px;
-        }
-        .name {
-            font-size: 1.8rem;
-            font-weight: bold;
-            background: linear-gradient(135deg, #FFD966, #FF8C42);
-            -webkit-background-clip: text;
-            background-clip: text;
-            color: transparent;
-            margin-bottom: 6px;
-        }
-        .anime {
-            font-size: 1rem;
-            color: #ccc;
-            margin-bottom: 8px;
-        }
-        .rarity {
-            display: inline-block;
-            background: rgba(255,215,0,0.2);
-            padding: 4px 12px;
-            border-radius: 40px;
-            font-size: 0.8rem;
-            font-weight: bold;
-            margin-bottom: 12px;
-        }
-        .price {
-            font-size: 1.3rem;
-            font-weight: bold;
-            color: #7CFC00;
-        }
-        .id {
-            font-family: monospace;
-            font-size: 0.8rem;
-            color: #aaa;
-            margin-top: 8px;
-        }
-        .slider-controls {
-            display: flex;
-            justify-content: center;
-            gap: 20px;
-            margin-top: 20px;
-            margin-bottom: 20px;
-        }
-        button {
-            background: #2c2c54;
-            border: none;
-            color: white;
-            font-size: 1.5rem;
-            padding: 10px 24px;
-            border-radius: 60px;
-            cursor: pointer;
-            transition: all 0.2s;
-            box-shadow: 0 4px 10px rgba(0,0,0,0.3);
-        }
-        button:active {
-            transform: scale(0.96);
-        }
-        .page-indicator {
-            text-align: center;
-            color: #aaa;
-            margin-top: 10px;
-        }
-        @media (max-width: 500px) {
-            .name { font-size: 1.4rem; }
-            .card { padding: 14px; }
-        }
-    </style>
-</head>
-<body>
-<div class="store-container">
-    <div id="card-container" class="card-container"></div>
-    <div class="slider-controls">
-        <button id="prevBtn">◀</button>
-        <button id="nextBtn">▶</button>
-    </div>
-    <div class="page-indicator" id="pageIndicator"></div>
-</div>
-<script>
-    let characters = [];
-    let currentIndex = 0;
-    let container = document.getElementById('card-container');
-    let prevBtn = document.getElementById('prevBtn');
-    let nextBtn = document.getElementById('nextBtn');
-    let indicator = document.getElementById('pageIndicator');
-
-    function renderCard(index) {
-        let char = characters[index];
-        if (!char) return;
-        let rarityEmoji = {
-            'Common':'⚪','Uncommon':'🟢','Elite':'🔵','Epic':'🟣','Mythic':'🔴',
-            'Waifu':'💖','Special Edition':'✨','Limited':'⏳','Event':'🎉','Legendary':'🌟'
-        }[char.rarity] || '⭐';
-        let html = `
-            <div class="card">
-                <img class="character-img" src="${char.img_url}" alt="${char.name}" loading="lazy">
-                <div class="info">
-                    <div class="name">${rarityEmoji} ${char.name}</div>
-                    <div class="anime">🎬 ${char.anime}</div>
-                    <div class="rarity">💎 ${char.rarity}</div>
-                    <div class="price">💰 ${char.price} coins</div>
-                    <div class="id">🆔 ${char.char_id}</div>
-                </div>
-            </div>
-        `;
-        container.innerHTML = html;
-        indicator.innerText = `Character ${currentIndex+1} of ${characters.length}`;
-    }
-
-    function loadCharacters() {
-        fetch('/api/characters')
-            .then(res => res.json())
-            .then(data => {
-                characters = data;
-                if (characters.length === 0) {
-                    container.innerHTML = '<div class="card"><div class="info">No characters available yet.</div></div>';
-                    prevBtn.disabled = true;
-                    nextBtn.disabled = true;
-                    indicator.innerText = '0 characters';
-                    return;
-                }
-                currentIndex = 0;
-                renderCard(0);
-                prevBtn.disabled = false;
-                nextBtn.disabled = false;
-            });
-    }
-
-    prevBtn.addEventListener('click', () => {
-        if (characters.length === 0) return;
-        currentIndex = (currentIndex - 1 + characters.length) % characters.length;
-        renderCard(currentIndex);
-    });
-    nextBtn.addEventListener('click', () => {
-        if (characters.length === 0) return;
-        currentIndex = (currentIndex + 1) % characters.length;
-        renderCard(currentIndex);
-    });
-    loadCharacters();
-</script>
-</body>
-</html>
-"""
-
-# FastAPI app
-app = FastAPI()
-
-# Enable CORS for Vercel frontend
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-@app.get("/", response_class=HTMLResponse)
-async def store_page():
-    return HTML_TEMPLATE
-
-@app.get("/api/characters")
-async def api_characters():
-    chars, _ = await db.get_market_characters(limit=500, offset=0)
-    # Return only needed fields
-    return [{"char_id": c["char_id"], "name": c["name"], "anime": c["anime"],
-             "img_url": c["img_url"], "rarity": c["rarity"], "price": c["price"]} for c in chars]
-
 # ---------- Main Entry Point ----------
 async def run_bot():
     # Initialize DB and tables
@@ -1194,17 +983,8 @@ async def run_bot():
     print("Bot started...")
     return application
 
-async def run_web():
-    port = int(os.getenv("PORT", 8000))
-    config = uvicorn.Config(app, host="0.0.0.0", port=port, log_level="info")
-    server = uvicorn.Server(config)
-    await server.serve()
-
 async def main():
-    # Run both bot and web server concurrently
-    bot_task = asyncio.create_task(run_bot())
-    web_task = asyncio.create_task(run_web())
-    await asyncio.gather(bot_task, web_task)
+    await run_bot()
 
 if __name__ == "__main__":
     asyncio.run(main())
