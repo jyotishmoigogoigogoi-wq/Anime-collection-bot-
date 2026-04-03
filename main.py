@@ -11,7 +11,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup,
-    InputMediaPhoto, ChatMemberStatus
+    InputMediaPhoto
 )
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
