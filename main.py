@@ -326,6 +326,22 @@ class Database:
 
 db = Database()
 
+
+# ---------- Minimal Web Server for Render ----------
+from fastapi import FastAPI
+from fastapi.responses import HTMLResponse
+import uvicorn
+
+web_app = FastAPI()
+
+@web_app.get("/")
+async def root():
+    return HTMLResponse("<h1>Bot is running ✅</h1><p>Telegram bot is active.</p>")
+
+@web_app.get("/health")
+async def health_check():
+    return {"status": "alive"}
+    
 # ---------- Helper Functions ----------
 def is_owner(user_id: int) -> bool:
     return user_id == OWNER_ID
@@ -984,7 +1000,16 @@ async def run_bot():
     return application
 
 async def main():
-    await run_bot()
+    # Run bot
+    bot_task = asyncio.create_task(run_bot())
+    
+    # Run web server on Render's assigned PORT
+    port = int(os.getenv("PORT", 8000))
+    config = uvicorn.Config(web_app, host="0.0.0.0", port=port, log_level="info")
+    server = uvicorn.Server(config)
+    web_task = asyncio.create_task(server.serve())
+    
+    await asyncio.gather(bot_task, web_task)
 
 if __name__ == "__main__":
     asyncio.run(main())
