@@ -86,6 +86,13 @@ class Database:
             await conn.execute('''
                 ALTER TABLE groups ADD COLUMN IF NOT EXISTS title TEXT
             ''')
+            # Migration: add streak columns if group_user_data existed without them
+            await conn.execute('''
+                ALTER TABLE group_user_data ADD COLUMN IF NOT EXISTS daily_streak INT DEFAULT 0
+            ''')
+            await conn.execute('''
+                ALTER TABLE group_user_data ADD COLUMN IF NOT EXISTS last_daily_date DATE
+            ''')
             await conn.execute('''
                 CREATE TABLE IF NOT EXISTS users (
                     user_id BIGINT, group_id BIGINT, PRIMARY KEY (user_id, group_id)
@@ -1957,124 +1964,300 @@ HTML_TEMPLATE = """
             background: linear-gradient(145deg, #0b0b1a 0%, #1a1a2e 100%);
             font-family: 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
             min-height: 100vh;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            padding: 20px;
+            color: #fff;
         }
-        .store-container { max-width: 500px; width: 100%; margin: 0 auto; }
-        .card {
-            background: rgba(20, 20, 40, 0.7);
-            backdrop-filter: blur(12px);
-            border-radius: 32px;
-            padding: 20px;
-            margin-bottom: 20px;
-            box-shadow: 0 20px 35px -10px rgba(0,0,0,0.5);
-            border: 1px solid rgba(255,255,255,0.1);
-            transition: transform 0.2s ease;
+
+        /* ── Header ── */
+        .header {
+            text-align: center;
+            padding: 28px 16px 10px;
         }
-        .card:hover { transform: translateY(-5px); }
-        .character-img {
-            width: 100%; border-radius: 28px; object-fit: cover;
-            aspect-ratio: 1 / 1; background: #111;
-            box-shadow: 0 8px 20px rgba(0,0,0,0.3);
-        }
-        .info { margin-top: 16px; }
-        .name {
-            font-size: 1.8rem; font-weight: bold;
+        .header h1 {
+            font-size: 1.65rem;
+            font-weight: 800;
             background: linear-gradient(90deg, #a78bfa, #f472b6);
             -webkit-background-clip: text; background-clip: text;
-            color: transparent; margin-bottom: 6px;
+            color: transparent;
+            letter-spacing: -0.5px;
         }
-        .anime { font-size: 1rem; color: #ccc; margin-bottom: 8px; }
-        .rarity {
-            display: inline-block; background: rgba(255,215,0,0.2);
-            padding: 4px 12px; border-radius: 40px;
-            font-size: 0.8rem; font-weight: bold; margin-bottom: 12px;
+        .header p { color: #666; font-size: 0.82rem; margin-top: 5px; }
+
+        /* ── Search Bar ── */
+        .search-wrap {
+            padding: 14px 16px 10px;
+            max-width: 500px;
+            margin: 0 auto;
         }
-        .price { font-size: 1.3rem; font-weight: bold; color: #7CFC00; }
-        .id { font-family: monospace; font-size: 0.8rem; color: #aaa; margin-top: 8px; }
-        .slider-controls {
-            display: flex; justify-content: center;
-            gap: 20px; margin-top: 20px; margin-bottom: 20px;
+        .search-bar {
+            width: 100%;
+            padding: 13px 18px;
+            background: rgba(255,255,255,0.06);
+            border: 1.5px solid rgba(255,255,255,0.1);
+            border-radius: 50px;
+            color: #fff;
+            font-size: 0.93rem;
+            outline: none;
+            transition: border-color 0.25s;
         }
-        button {
-            background: #2c2c54; border: none; color: white;
-            font-size: 1.5rem; padding: 10px 24px;
-            border-radius: 60px; cursor: pointer;
-            transition: all 0.2s; box-shadow: 0 4px 10px rgba(0,0,0,0.3);
+        .search-bar::placeholder { color: #555; }
+        .search-bar:focus { border-color: #a78bfa; background: rgba(167,139,250,0.07); }
+
+        /* ── Anime Filter Strip ── */
+        .filter-strip {
+            padding: 4px 12px 14px;
+            overflow-x: auto;
+            white-space: nowrap;
+            scrollbar-width: none;
         }
-        button:active { transform: scale(0.96); }
-        .page-indicator { text-align: center; color: #aaa; margin-top: 10px; }
-        @media (max-width: 500px) { .name { font-size: 1.4rem; } .card { padding: 14px; } }
+        .filter-strip::-webkit-scrollbar { display: none; }
+        .anime-btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            padding: 7px 14px;
+            margin-right: 7px;
+            background: rgba(255,255,255,0.06);
+            border: 1.5px solid rgba(255,255,255,0.09);
+            border-radius: 50px;
+            color: #aaa;
+            font-size: 0.8rem;
+            cursor: pointer;
+            transition: all 0.2s;
+            white-space: nowrap;
+            user-select: none;
+            -webkit-tap-highlight-color: transparent;
+        }
+        .anime-btn.active {
+            background: linear-gradient(90deg, #7c3aed, #db2777);
+            border-color: transparent;
+            color: #fff;
+            font-weight: 700;
+            box-shadow: 0 4px 14px rgba(124,58,237,0.4);
+        }
+        .btn-count {
+            background: rgba(255,255,255,0.14);
+            border-radius: 20px;
+            padding: 1px 7px;
+            font-size: 0.72rem;
+            font-weight: 600;
+        }
+        .anime-btn.active .btn-count { background: rgba(255,255,255,0.22); }
+
+        /* ── Card Area ── */
+        .main {
+            max-width: 500px;
+            margin: 0 auto;
+            padding: 0 16px 50px;
+        }
+        .card {
+            background: rgba(18,18,38,0.82);
+            backdrop-filter: blur(14px);
+            border-radius: 28px;
+            padding: 18px;
+            border: 1px solid rgba(255,255,255,0.07);
+            box-shadow: 0 22px 44px rgba(0,0,0,0.55);
+            transition: transform 0.22s;
+        }
+        .card:hover { transform: translateY(-4px); }
+        .character-img {
+            width: 100%; border-radius: 20px;
+            object-fit: cover; aspect-ratio: 1/1;
+            background: #0d0d1a;
+            box-shadow: 0 8px 24px rgba(0,0,0,0.45);
+            display: block;
+        }
+        .info { margin-top: 14px; }
+        .char-name {
+            font-size: 1.55rem; font-weight: 800;
+            background: linear-gradient(90deg, #a78bfa, #f472b6);
+            -webkit-background-clip: text; background-clip: text;
+            color: transparent;
+            line-height: 1.25;
+            margin-bottom: 5px;
+        }
+        .char-anime { font-size: 0.92rem; color: #bbb; margin-bottom: 10px; }
+        .badges { display: flex; flex-wrap: wrap; gap: 7px; margin-bottom: 10px; }
+        .badge {
+            padding: 4px 13px; border-radius: 40px;
+            font-size: 0.78rem; font-weight: 700;
+        }
+        .badge-rarity { background: rgba(255,215,0,0.12); color: #ffd700; border: 1px solid rgba(255,215,0,0.2); }
+        .badge-price  { background: rgba(124,252,0,0.10); color: #7CFC00;  border: 1px solid rgba(124,252,0,0.18); }
+        .char-id { font-family: monospace; font-size: 0.76rem; color: #555; margin-top: 4px; }
+
+        /* ── Navigation ── */
+        .nav {
+            display: flex; align-items: center;
+            justify-content: center; gap: 18px;
+            margin-top: 18px;
+        }
+        .nav-btn {
+            background: rgba(124,58,237,0.25);
+            border: 1.5px solid rgba(124,58,237,0.35);
+            color: #fff; font-size: 1.25rem;
+            padding: 11px 24px; border-radius: 50px;
+            cursor: pointer; transition: all 0.2s;
+            -webkit-tap-highlight-color: transparent;
+        }
+        .nav-btn:active { transform: scale(0.93); }
+        .nav-btn:hover:not(:disabled) { background: rgba(124,58,237,0.45); }
+        .nav-btn:disabled { opacity: 0.28; cursor: default; }
+        .page-info { color: #777; font-size: 0.84rem; min-width: 70px; text-align: center; }
+
+        /* ── Empty / Loading ── */
+        .empty {
+            text-align: center; padding: 64px 20px;
+            color: #555; font-size: 0.95rem;
+        }
+        .empty-icon { font-size: 2.8rem; margin-bottom: 12px; }
+        .loading { text-align: center; padding: 80px 20px; }
+        .dot {
+            display: inline-block; width: 9px; height: 9px;
+            background: #a78bfa; border-radius: 50%;
+            margin: 0 3px;
+            animation: blink 1.2s infinite ease-in-out;
+        }
+        .dot:nth-child(2){ animation-delay:.2s }
+        .dot:nth-child(3){ animation-delay:.4s }
+        @keyframes blink {
+            0%,80%,100%{ transform:scale(1); opacity:.6 }
+            40%{ transform:scale(1.5); opacity:1 }
+        }
+
+        @media(max-width:420px){
+            .char-name{ font-size:1.3rem }
+            .card{ padding:14px }
+            .header h1{ font-size:1.4rem }
+        }
     </style>
 </head>
 <body>
-<div class="store-container">
-    <div id="card-container" class="card-container"></div>
-    <div class="slider-controls">
-        <button id="prevBtn">◀</button>
-        <button id="nextBtn">▶</button>
-    </div>
-    <div class="page-indicator" id="pageIndicator"></div>
+
+<div class="header">
+    <h1>✨ Anime Character Store</h1>
+    <p>Collect · Trade · Dominate</p>
 </div>
+
+<div class="search-wrap">
+    <input type="text" id="searchBar" class="search-bar" placeholder="🔍  Search by name, anime or ID…" autocomplete="off">
+</div>
+
+<div class="filter-strip" id="filterStrip"></div>
+
+<div class="main">
+    <div id="cardArea">
+        <div class="loading">
+            <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+            <p style="margin-top:18px;color:#555;font-size:0.88rem">Loading characters…</p>
+        </div>
+    </div>
+    <div class="nav" id="navRow" style="display:none">
+        <button class="nav-btn" id="prevBtn">◀</button>
+        <span class="page-info" id="pageInfo"></span>
+        <button class="nav-btn" id="nextBtn">▶</button>
+    </div>
+</div>
+
 <script>
-    let characters = [];
-    let currentIndex = 0;
-    let container = document.getElementById('card-container');
-    let prevBtn = document.getElementById('prevBtn');
-    let nextBtn = document.getElementById('nextBtn');
-    let indicator = document.getElementById('pageIndicator');
+(function(){
+    const RARITY_EMOJI = {
+        'Common':'⚪','Uncommon':'🟢','Elite':'🔵','Epic':'🟣','Mythic':'🔴',
+        'Waifu':'💖','Special Edition':'✨','Limited':'⏳','Event':'🎉','Legendary':'🌟'
+    };
 
-    function renderCard(index) {
-        let char = characters[index];
-        if (!char) return;
-        let rarityEmoji = {
-            'Common':'⚪','Uncommon':'🟢','Elite':'🔵','Epic':'🟣','Mythic':'🔴',
-            'Waifu':'💖','Special Edition':'✨','Limited':'⏳','Event':'🎉','Legendary':'🌟'
-        }[char.rarity] || '⭐';
-        container.innerHTML = `
-            <div class="card">
-                <img class="character-img" src="${char.img_url}" alt="${char.name}" loading="lazy">
-                <div class="info">
-                    <div class="name">${rarityEmoji} ${char.name}</div>
-                    <div class="anime">🎬 ${char.anime}</div>
-                    <div class="rarity">💎 ${char.rarity}</div>
-                    <div class="price">💰 ${char.price} coins</div>
-                    <div class="id">🆔 ${char.char_id}</div>
-                </div>
-            </div>`;
-        indicator.innerText = `Character ${currentIndex+1} of ${characters.length}`;
-    }
+    let all = [], shown = [], idx = 0, activeAnime = 'All';
 
-    function loadCharacters() {
-        fetch('/api/characters')
-            .then(res => res.json())
-            .then(data => {
-                characters = data;
-                if (characters.length === 0) {
-                    container.innerHTML = '<div class="card"><div class="info">No characters available yet.</div></div>';
-                    prevBtn.disabled = true;
-                    nextBtn.disabled = true;
-                    indicator.innerText = '0 characters';
-                    return;
-                }
-                currentIndex = 0;
-                renderCard(0);
+    const cardArea   = document.getElementById('cardArea');
+    const navRow     = document.getElementById('navRow');
+    const prevBtn    = document.getElementById('prevBtn');
+    const nextBtn    = document.getElementById('nextBtn');
+    const pageInfo   = document.getElementById('pageInfo');
+    const filterStrip= document.getElementById('filterStrip');
+    const searchBar  = document.getElementById('searchBar');
+
+    function esc(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+    function buildFilters(){
+        const counts = {};
+        all.forEach(c => counts[c.anime] = (counts[c.anime]||0)+1);
+        const names = Object.keys(counts).sort();
+        let html = `<span class="anime-btn active" data-a="All">🌸 All<span class="btn-count">${all.length}</span></span>`;
+        names.forEach(a => {
+            html += `<span class="anime-btn" data-a="${esc(a)}">${esc(a)}<span class="btn-count">${counts[a]}</span></span>`;
+        });
+        filterStrip.innerHTML = html;
+        filterStrip.querySelectorAll('.anime-btn').forEach(btn => {
+            btn.addEventListener('click', ()=>{
+                activeAnime = btn.dataset.a;
+                filterStrip.querySelectorAll('.anime-btn').forEach(b=>b.classList.remove('active'));
+                btn.classList.add('active');
+                idx = 0;
+                applyFilter();
             });
+        });
     }
 
-    prevBtn.addEventListener('click', () => {
-        if (!characters.length) return;
-        currentIndex = (currentIndex - 1 + characters.length) % characters.length;
-        renderCard(currentIndex);
-    });
-    nextBtn.addEventListener('click', () => {
-        if (!characters.length) return;
-        currentIndex = (currentIndex + 1) % characters.length;
-        renderCard(currentIndex);
-    });
-    loadCharacters();
+    function applyFilter(){
+        const q = searchBar.value.trim().toLowerCase();
+        shown = all.filter(c => {
+            const okAnime  = activeAnime === 'All' || c.anime === activeAnime;
+            const okSearch = !q || c.name.toLowerCase().includes(q)
+                              || c.anime.toLowerCase().includes(q)
+                              || c.char_id.toLowerCase().includes(q);
+            return okAnime && okSearch;
+        });
+        idx = 0;
+        render();
+    }
+
+    function render(){
+        if(!shown.length){
+            cardArea.innerHTML = `<div class="empty"><div class="empty-icon">🌙</div><p>No characters found.<br><span style="font-size:.82rem;color:#444">Try a different filter or search.</span></p></div>`;
+            navRow.style.display='none';
+            return;
+        }
+        const c = shown[idx];
+        const em = RARITY_EMOJI[c.rarity]||'⭐';
+        cardArea.innerHTML = `
+        <div class="card">
+            <img class="character-img" src="${esc(c.img_url)}" alt="${esc(c.name)}" loading="lazy">
+            <div class="info">
+                <div class="char-name">${em} ${esc(c.name)}</div>
+                <div class="char-anime">🎬 ${esc(c.anime)}</div>
+                <div class="badges">
+                    <span class="badge badge-rarity">${em} ${esc(c.rarity)}</span>
+                    <span class="badge badge-price">💰 ${Number(c.price).toLocaleString()} coins</span>
+                </div>
+                <div class="char-id">🆔 ${esc(c.char_id)}</div>
+            </div>
+        </div>`;
+        navRow.style.display = 'flex';
+        pageInfo.textContent = `${idx+1} / ${shown.length}`;
+        prevBtn.disabled = idx === 0;
+        nextBtn.disabled = idx === shown.length-1;
+    }
+
+    prevBtn.addEventListener('click', ()=>{ if(idx>0){ idx--; render(); } });
+    nextBtn.addEventListener('click', ()=>{ if(idx<shown.length-1){ idx++; render(); } });
+
+    let debounce;
+    searchBar.addEventListener('input', ()=>{ clearTimeout(debounce); debounce=setTimeout(applyFilter,220); });
+
+    fetch('/api/characters')
+        .then(r=>r.json())
+        .then(data=>{
+            all = data; shown = data;
+            if(!all.length){
+                cardArea.innerHTML=`<div class="empty"><div class="empty-icon">📭</div><p>No characters yet.<br><span style="font-size:.82rem;color:#444">Check back soon!</span></p></div>`;
+                return;
+            }
+            buildFilters();
+            render();
+        })
+        .catch(()=>{
+            cardArea.innerHTML=`<div class="empty"><div class="empty-icon">⚠️</div><p>Failed to load.<br><span style="font-size:.82rem;color:#444">Please refresh the page.</span></p></div>`;
+        });
+})();
 </script>
 </body>
 </html>
