@@ -1282,7 +1282,6 @@ async def expire_drop(bot, group_id: int):
     msg = random.choice(t('en', 'salty')).replace("{name}", char['name'])
     await bot.send_message(group_id, msg)
     await db.end_drop(group_id)
-    await db.reset_win_streak(group_id)
 
 async def send_weekly_leaderboard(bot):
     """Every Sunday: send leaderboard to all groups, reward top 3, notify winners in DM."""
