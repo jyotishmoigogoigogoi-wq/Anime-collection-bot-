@@ -7,7 +7,7 @@ from typing import Optional, List, Tuple, Dict, Any
 
 from dotenv import load_dotenv
 import asyncpg
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from telegram import (
@@ -22,6 +22,7 @@ from telegram.ext import (
 from telegram.constants import ChatMemberStatus as CMS
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
+from apscheduler.triggers.cron import CronTrigger
 import uvicorn
 
 load_dotenv()
@@ -40,14 +41,18 @@ OWNER_USERNAME = os.getenv("OWNER_USERNAME", "YorichiiPrime")
 OWNER_LINK = f"https://t.me/{OWNER_USERNAME}"
 SUPPORT_LINK = os.getenv("SUPPORT_LINK", "https://t.me/kingchaos7")
 WEB_STORE_URL = os.getenv("WEB_STORE_URL", "https://your-vercel-app.vercel.app")
+# Set WEBHOOK_URL in your environment for production (e.g. https://myapp.railway.app)
+# Leave empty to use polling (local/dev)
+WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")
 
 # Conversation states
 NAME, ANIME, IMG_URL, RARITY, PRICE = range(5)
 
-# Global scheduler
+# Global scheduler and application reference (used by webhook endpoint)
 scheduler = AsyncIOScheduler()
+bot_application = None
 
-# Salty messages (no .format, we will replace manually)
+# Salty messages for expired drops
 SALTY_MESSAGES = [
     "No one guessed... what a fool group 🙄",
     "50 minutes and nothing? Embarrassing 💀",
@@ -69,13 +74,17 @@ class Database:
 
     async def init_tables(self):
         async with self.pool.acquire() as conn:
-            # Original tables
             await conn.execute('''
                 CREATE TABLE IF NOT EXISTS groups (
                     group_id BIGINT PRIMARY KEY,
                     welcome_img_id TEXT,
-                    last_calladmins TIMESTAMP
+                    last_calladmins TIMESTAMP,
+                    title TEXT
                 )
+            ''')
+            # Migration: add title column if table already existed without it
+            await conn.execute('''
+                ALTER TABLE groups ADD COLUMN IF NOT EXISTS title TEXT
             ''')
             await conn.execute('''
                 CREATE TABLE IF NOT EXISTS users (
@@ -124,7 +133,6 @@ class Database:
                     rarity TEXT PRIMARY KEY, tier INT UNIQUE, emoji TEXT
                 )
             ''')
-            # Drop system tables
             await conn.execute('''
                 CREATE TABLE IF NOT EXISTS drops_active (
                     group_id BIGINT PRIMARY KEY, enabled BOOLEAN DEFAULT FALSE
@@ -144,7 +152,6 @@ class Database:
                     PRIMARY KEY (group_id, user_id)
                 )
             ''')
-            # Tasks system
             await conn.execute('''
                 CREATE TABLE IF NOT EXISTS tasks (
                     task_id SERIAL PRIMARY KEY,
@@ -170,7 +177,6 @@ class Database:
                     added_at TIMESTAMP, rewarded BOOLEAN DEFAULT FALSE
                 )
             ''')
-            # Fixed bonus_tasks: generic table, no dynamic columns
             await conn.execute('''
                 CREATE TABLE IF NOT EXISTS bonus_tasks (
                     user_id BIGINT,
@@ -179,12 +185,20 @@ class Database:
                     PRIMARY KEY (user_id, task_name)
                 )
             ''')
-            # Guess cooldown per drop
             await conn.execute('''
                 CREATE TABLE IF NOT EXISTS guess_cooldown (
                     user_id BIGINT, group_id BIGINT,
                     last_guess TIMESTAMP,
                     PRIMARY KEY (user_id, group_id)
+                )
+            ''')
+            # User info cache for stats & leaderboard display
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS user_info (
+                    user_id BIGINT PRIMARY KEY,
+                    first_name TEXT,
+                    username TEXT,
+                    updated_at TIMESTAMP DEFAULT NOW()
                 )
             ''')
             # Default rarities
@@ -197,6 +211,16 @@ class Database:
                 ('Special Edition', 7, '✨'), ('Limited', 8, '⏳'),
                 ('Event', 9, '🎉'), ('Legendary', 10, '🌟')
             ])
+
+    # ---------- User Info ----------
+    async def update_user_info(self, user_id: int, first_name: str, username: str = None):
+        async with self.pool.acquire() as conn:
+            await conn.execute('''
+                INSERT INTO user_info (user_id, first_name, username, updated_at)
+                VALUES ($1, $2, $3, NOW())
+                ON CONFLICT (user_id) DO UPDATE
+                SET first_name = $2, username = $3, updated_at = NOW()
+            ''', user_id, first_name, username)
 
     # ---------- User tracking ----------
     async def user_has_started(self, user_id: int) -> bool:
@@ -220,6 +244,13 @@ class Database:
                 group_id, file_id
             )
 
+    async def update_group_title(self, group_id: int, title: str):
+        async with self.pool.acquire() as conn:
+            await conn.execute('''
+                INSERT INTO groups (group_id, title) VALUES ($1, $2)
+                ON CONFLICT (group_id) DO UPDATE SET title = $2
+            ''', group_id, title)
+
     async def get_last_calladmins(self, group_id: int) -> Optional[datetime]:
         async with self.pool.acquire() as conn:
             return await conn.fetchval('SELECT last_calladmins FROM groups WHERE group_id = $1', group_id)
@@ -231,6 +262,27 @@ class Database:
                 'ON CONFLICT (group_id) DO UPDATE SET last_calladmins = NOW()',
                 group_id
             )
+
+    async def get_all_group_ids(self) -> List[int]:
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch('SELECT group_id FROM groups')
+            return [r['group_id'] for r in rows]
+
+    async def get_all_groups_info(self) -> List[dict]:
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch('SELECT group_id, title FROM groups ORDER BY group_id')
+            return [dict(r) for r in rows]
+
+    async def get_group_members_info(self, group_id: int) -> List[dict]:
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch('''
+                SELECT DISTINCT gu.user_id, u.first_name, u.username
+                FROM group_user_data gu
+                LEFT JOIN user_info u ON gu.user_id = u.user_id
+                WHERE gu.group_id = $1
+                ORDER BY u.first_name NULLS LAST
+            ''', group_id)
+            return [dict(r) for r in rows]
 
     # ---------- Coins ----------
     async def get_user_coins(self, user_id: int) -> int:
@@ -311,7 +363,7 @@ class Database:
             ) or 0
 
     async def get_user_char_count_global(self, user_id: int) -> int:
-        """Returns the total distinct characters this user owns across all groups."""
+        """Returns total distinct characters this user owns across all groups."""
         async with self.pool.acquire() as conn:
             return await conn.fetchval(
                 'SELECT COUNT(DISTINCT char_id) FROM inventory WHERE user_id = $1',
@@ -541,7 +593,7 @@ class Database:
             rows = await conn.fetch('SELECT group_id FROM drops_active WHERE enabled = TRUE')
             return [r['group_id'] for r in rows]
 
-    # ---------- Guess cooldown ----------
+    # ---------- Guess Cooldown ----------
     async def can_guess(self, user_id: int, group_id: int, cooldown_sec: int = 10) -> bool:
         async with self.pool.acquire() as conn:
             last = await conn.fetchval(
@@ -649,7 +701,7 @@ class Database:
                 user_id, group_id
             )
 
-    # ---------- Bonus Tasks (fixed) ----------
+    # ---------- Bonus Tasks ----------
     async def is_bonus_completed(self, user_id: int, task_name: str) -> bool:
         async with self.pool.acquire() as conn:
             return await conn.fetchval(
@@ -664,6 +716,23 @@ class Database:
                 VALUES ($1, $2, TRUE) ON CONFLICT (user_id, task_name) DO UPDATE SET completed = TRUE
             ''', user_id, task_name)
 
+    # ---------- Leaderboard ----------
+    async def get_leaderboard_data(self, limit: int = 10) -> List[dict]:
+        """Top users by total distinct characters owned across all groups."""
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch('''
+                SELECT i.user_id,
+                       COUNT(DISTINCT i.char_id) AS total,
+                       u.first_name,
+                       u.username
+                FROM inventory i
+                LEFT JOIN user_info u ON i.user_id = u.user_id
+                GROUP BY i.user_id, u.first_name, u.username
+                ORDER BY total DESC
+                LIMIT $1
+            ''', limit)
+            return [dict(r) for r in rows]
+
     # ---------- Stats ----------
     async def get_total_users(self) -> int:
         async with self.pool.acquire() as conn:
@@ -677,10 +746,23 @@ class Database:
                 today
             ) or 0
 
-    async def get_all_users(self) -> List[dict]:
+    async def get_all_users_info(self) -> List[dict]:
         async with self.pool.acquire() as conn:
-            rows = await conn.fetch('SELECT user_id FROM started_users ORDER BY user_id')
+            rows = await conn.fetch('''
+                SELECT s.user_id, u.first_name, u.username
+                FROM started_users s
+                LEFT JOIN user_info u ON s.user_id = u.user_id
+                ORDER BY s.started_at DESC
+            ''')
             return [dict(r) for r in rows]
+
+    async def get_total_characters(self) -> int:
+        async with self.pool.acquire() as conn:
+            return await conn.fetchval('SELECT COUNT(*) FROM characters WHERE is_available = true') or 0
+
+    async def get_total_referrals(self) -> int:
+        async with self.pool.acquire() as conn:
+            return await conn.fetchval('SELECT COUNT(*) FROM referrals') or 0
 
 db = Database()
 
@@ -695,6 +777,8 @@ async def ensure_started(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not await db.user_has_started(user.id):
         await update.message.reply_text("❌ Please start the bot first with /start")
         return False
+    # Keep user info fresh on every interaction
+    await db.update_user_info(user.id, user.first_name, user.username)
     return True
 
 def get_effective_group_id(update: Update) -> int:
@@ -704,12 +788,16 @@ def get_effective_group_id(update: Update) -> int:
     return 0
 
 async def format_character_card(char: dict, emoji: str) -> str:
+    """Returns an HTML-formatted character card."""
+    name = html_lib.escape(char['name'])
+    anime = html_lib.escape(char['anime'])
+    rarity = html_lib.escape(char['rarity'])
     return (
-        f"{emoji} *{char['name']}*\n"
-        f"🎬 *Anime:* {char['anime']}\n"
-        f"💎 *Rarity:* {emoji} {char['rarity']}\n"
-        f"🆔 *ID:* `{char['char_id']}`\n"
-        f"💰 *Price:* {char['price']} coins"
+        f"{emoji} <b>{name}</b>\n"
+        f"🎬 <b>Anime:</b> {anime}\n"
+        f"💎 <b>Rarity:</b> {emoji} {rarity}\n"
+        f"🆔 <b>ID:</b> <code>{char['char_id']}</code>\n"
+        f"💰 <b>Price:</b> {char['price']} coins"
     )
 
 async def check_collector_bonus(user_id: int, group_id: int, update: Update):
@@ -720,14 +808,17 @@ async def check_collector_bonus(user_id: int, group_id: int, update: Update):
     if count >= 10:
         await db.complete_bonus(user_id, 'collector')
         await db.add_coins(user_id, 2500)
-        await update.message.reply_text("🎉 *Collector Bonus!* You own 10 characters in this group! +2500 coins!", parse_mode="Markdown")
+        await update.message.reply_text(
+            "🎉 <b>Collector Bonus!</b> You own 10 characters in this group! +2500 coins!",
+            parse_mode="HTML"
+        )
 
 # ---------- Drop System Jobs ----------
 async def perform_drop(bot, group_id: int):
     if not await db.is_drops_enabled(group_id):
         return
     if await db.get_current_drop(group_id):
-        return  # already active
+        return
     char = await db.get_random_character()
     if not char:
         return
@@ -740,10 +831,8 @@ async def perform_drop(bot, group_id: int):
         try:
             await bot.pin_chat_message(group_id, msg.message_id)
         except Exception:
-            pass  # no permission
+            pass
         await db.create_drop(group_id, char['char_id'], msg.message_id)
-
-        # Schedule hint and expiry
         scheduler.add_job(
             show_drop_hint, 'date',
             run_date=datetime.utcnow() + timedelta(minutes=30),
@@ -760,7 +849,7 @@ async def perform_drop(bot, group_id: int):
         )
     except Exception as e:
         print(f"Drop error in {group_id}: {e}")
-        await db.disable_drops(group_id)  # auto-disable on fatal error
+        await db.disable_drops(group_id)
 
 async def show_drop_hint(bot, group_id: int):
     drop = await db.get_current_drop(group_id)
@@ -770,11 +859,12 @@ async def show_drop_hint(bot, group_id: int):
     if not char:
         return
     try:
+        anime = html_lib.escape(char['anime'])
         await bot.edit_message_caption(
             chat_id=group_id,
             message_id=drop['message_id'],
-            caption=f"🎭 Guess the character!\n\n💡 Hint: From *{char['anime']}*",
-            parse_mode="Markdown"
+            caption=f"🎭 Guess the character!\n\n💡 <b>Hint:</b> From <i>{anime}</i>",
+            parse_mode="HTML"
         )
         await db.show_hint(group_id)
     except Exception:
@@ -797,17 +887,91 @@ async def expire_drop(bot, group_id: int):
     await db.end_drop(group_id)
     await db.reset_win_streak(group_id)
 
+async def send_weekly_leaderboard(bot):
+    """Every Sunday: send leaderboard to all groups, reward top 3, notify winners in DM."""
+    top_users = await db.get_leaderboard_data(limit=10)
+    if not top_users:
+        return
+
+    medals = ["🥇", "🥈", "🥉"]
+    prizes = [3000, 2000, 1000]
+    now = datetime.utcnow().strftime("%B %d, %Y")
+
+    # Distribute prizes to top 3 and notify them in DM
+    prize_lines = []
+    for i, reward in enumerate(prizes):
+        if i >= len(top_users):
+            break
+        user = top_users[i]
+        await db.add_coins(user['user_id'], reward)
+        name = html_lib.escape(user.get('first_name') or f"User {user['user_id']}")
+        mention = f'<a href="tg://user?id={user["user_id"]}">{name}</a>'
+        prize_lines.append((medals[i], mention, name, user['user_id'], reward))
+        try:
+            await bot.send_message(
+                user['user_id'],
+                f"🎉 <b>Weekly Leaderboard Prize!</b>\n\n"
+                f"You ranked <b>#{i + 1}</b> on the global collector leaderboard!\n"
+                f"💰 <b>+{reward} coins</b> have been added to your wallet!\n\n"
+                f"Keep collecting to stay on top! 🏆",
+                parse_mode="HTML"
+            )
+        except Exception:
+            pass
+
+    # Build leaderboard text
+    lb_text = (
+        f"╔══════════════════════════╗\n"
+        f"   🏆 <b>WEEKLY LEADERBOARD</b> 🏆\n"
+        f"╚══════════════════════════╝\n\n"
+    )
+    for i, user in enumerate(top_users):
+        medal = medals[i] if i < 3 else f"{i + 1}."
+        name = html_lib.escape(user.get('first_name') or f"User {user['user_id']}")
+        mention = f'<a href="tg://user?id={user["user_id"]}">{name}</a>'
+        lb_text += f"{medal} {mention} — <b>{user['total']}</b> chars\n"
+
+    lb_text += f"\n━━━━━━━━━━━━━━━━\n"
+    lb_text += f"🎊 <b>Weekly Prizes Distributed!</b>\n"
+    for medal, mention, name, uid, reward in prize_lines:
+        lb_text += f"{medal} {mention} — <b>+{reward} coins</b>\n"
+
+    lb_text += f"\n📅 <i>{now}</i> | 💡 <i>Collect more to climb the ranks!</i>"
+
+    # Send to all known groups
+    all_groups = await db.get_all_group_ids()
+    for group_id in all_groups:
+        try:
+            msg = await bot.send_message(group_id, lb_text, parse_mode="HTML")
+            try:
+                await bot.pin_chat_message(group_id, msg.message_id)
+            except Exception:
+                pass
+        except Exception:
+            pass
+
 async def start_drop_scheduler(bot):
     async def hourly_drops():
         groups = await db.get_groups_with_drops()
         for gid in groups:
             await perform_drop(bot, gid)
+
     scheduler.add_job(hourly_drops, IntervalTrigger(hours=1), id='hourly_drops', replace_existing=True)
+    # Weekly leaderboard every Sunday at 12:00 UTC
+    scheduler.add_job(
+        send_weekly_leaderboard,
+        CronTrigger(day_of_week='sun', hour=12, minute=0),
+        args=[bot],
+        id='weekly_leaderboard',
+        replace_existing=True
+    )
     scheduler.start()
 
 # ---------- Bot Command Handlers ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+    # Save/update user info on every start
+    await db.update_user_info(user.id, user.first_name, user.username)
     # Referral handling
     if context.args and context.args[0].startswith('ref_'):
         try:
@@ -818,10 +982,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await db.add_coins(referrer_id, 1000)
                     await db.add_coins(user.id, 500)
                     try:
-                        await context.bot.send_message(referrer_id, f"🎉 *New Referral!*\n@{user.username or user.first_name} joined using your link!\n💰 You earned 1000 coins!", parse_mode="Markdown")
-                    except:
+                        ref_name = html_lib.escape(user.username or user.first_name)
+                        await context.bot.send_message(
+                            referrer_id,
+                            f"🎉 <b>New Referral!</b>\n"
+                            f"@{ref_name} joined using your link!\n"
+                            f"💰 You earned <b>1000 coins!</b>",
+                            parse_mode="HTML"
+                        )
+                    except Exception:
                         pass
-        except:
+        except Exception:
             pass
     await db.register_start(user.id)
     video_id = await db.get_start_video()
@@ -850,9 +1021,13 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /search <n> - Search characters
 
 *🎭 Drop System (Groups)*
-/guess <name> - Guess the dropped character
+/guess <n> - Guess the dropped character
 /enabledrops - Enable drops (admin/owner)
 /disabledrops - Disable drops (admin/owner)
+
+*🏆 Leaderboard (Groups)*
+/leaderboard - View top global collectors
+_(Auto-posts & pins every Sunday with prizes!)_
 
 *📋 Tasks (DM Only)*
 /tasks - View and complete tasks
@@ -872,6 +1047,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /setwelcomepic (reply to photo, in group)
 /resetgrpdata - Reset group data (danger)
 /stats - Bot statistics
+/groupmembers <id> - Members of a group
 
 *Other*
 /start - Start the bot
@@ -893,7 +1069,10 @@ async def daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if streak >= 7 and streak % 7 == 0:
             await db.add_coins(user.id, 3000)
             streak_text += "\n🎉 *7-Day Streak Bonus!* +3000 coins!"
-        await update.message.reply_text(f"💸 You claimed *{reward} coins*!\n💰 Total balance: `{coins}` coins{streak_text}", parse_mode="Markdown")
+        await update.message.reply_text(
+            f"💸 You claimed *{reward} coins*!\n💰 Total balance: `{coins}` coins{streak_text}",
+            parse_mode="Markdown"
+        )
     else:
         await update.message.reply_text("⏳ You already claimed daily coins here. Try again in 2 hours.")
 
@@ -1022,7 +1201,7 @@ async def send_market_page(target, page: int, send_new: bool = True):
     for c in items:
         emoji = await db.get_rarity_emoji(c['rarity'])
         text += f"{emoji} *{c['name']}* — _{c['anime']}_\n   💰 `{c['price']}` coins  •  🆔 `{c['char_id']}`\n\n"
-    text += "_Use /buy \\</id\\> to purchase a character_"
+    text += "_Use /buy <id> to purchase a character_"
     row = []
     if page > 1:
         row.append(InlineKeyboardButton("◀ Prev", callback_data=f"mkt:{page - 1}"))
@@ -1107,7 +1286,10 @@ async def sell(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sell_price = int(char['price'] * 0.7)
     await db.add_coins(user.id, sell_price)
     await db.remove_from_inventory(user.id, group_id, char_id)
-    await update.message.reply_text(f"💰 Sold {char['name']} for {sell_price} coins (70% of base).")
+    await update.message.reply_text(
+        f"💰 Sold <b>{html_lib.escape(char['name'])}</b> for <b>{sell_price} coins</b> (70% of base).",
+        parse_mode="HTML"
+    )
 
 async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
@@ -1122,9 +1304,9 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
         emoji = await db.get_rarity_emoji(char['rarity'])
         caption = await format_character_card(char, emoji)
         if char.get('img_url'):
-            await update.message.reply_photo(char['img_url'], caption=caption, parse_mode="Markdown")
+            await update.message.reply_photo(char['img_url'], caption=caption, parse_mode="HTML")
         else:
-            await update.message.reply_text(caption, parse_mode="Markdown")
+            await update.message.reply_text(caption, parse_mode="HTML")
 
 async def guess(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
@@ -1136,7 +1318,6 @@ async def guess(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     user = update.effective_user
     group_id = chat.id
-    # Rate limit per user per group (10 sec)
     if not await db.can_guess(user.id, group_id, 10):
         await update.message.reply_text("⏳ Please wait 10 seconds before guessing again.")
         return
@@ -1165,29 +1346,35 @@ async def guess(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             reward = 500
             await db.add_to_inventory(user.id, group_id, char['char_id'])
-            reward_text = f"🎴 {char['name']} added to your vault!"
+            reward_text = f"🎴 {html_lib.escape(char['name'])} added to your vault!"
         await db.add_coins(user.id, reward)
         try:
             await context.bot.unpin_chat_message(group_id, drop['message_id'])
-        except:
+        except Exception:
             pass
-        mention = f'<a href="tg://user?id={user.id}">{user.first_name}</a>'
+        mention = f'<a href="tg://user?id={user.id}">{html_lib.escape(user.first_name)}</a>'
         streak_text = f"\n🔥 x{streak} Streak!" if streak >= 3 else ""
         await update.message.reply_text(
-            f"✨ <b>CORRECT!</b> {mention} guessed <b>{char['name']}</b>!{streak_text}\n\n💰 Reward: +{reward} coins\n{reward_text}",
+            f"✨ <b>CORRECT!</b> {mention} guessed <b>{html_lib.escape(char['name'])}</b>!{streak_text}\n\n"
+            f"💰 Reward: +{reward} coins\n{reward_text}",
             parse_mode="HTML"
         )
         if streak >= 3:
             try:
-                streak_msg = await context.bot.send_message(group_id, f"🔥 @{user.username or user.first_name} x{streak} streak!", parse_mode="Markdown")
+                streak_name = user.username or user.first_name
+                streak_msg = await context.bot.send_message(
+                    group_id,
+                    f"🔥 <b>@{html_lib.escape(streak_name)} x{streak} streak!</b> 🔥",
+                    parse_mode="HTML"
+                )
                 await context.bot.pin_chat_message(group_id, streak_msg.message_id)
-            except:
+            except Exception:
                 pass
         await db.end_drop(group_id)
         if not await db.is_bonus_completed(user.id, 'first_guess'):
             await db.complete_bonus(user.id, 'first_guess')
             await db.add_coins(user.id, 1000)
-            await update.message.reply_text("🎉 *First Guess Win Bonus!* +1000 coins!", parse_mode="Markdown")
+            await update.message.reply_text("🎉 <b>First Guess Win Bonus!</b> +1000 coins!", parse_mode="HTML")
         await check_collector_bonus(user.id, group_id, update)
     else:
         await update.message.reply_text("❌ Wrong guess! Try again!")
@@ -1203,13 +1390,16 @@ async def enabledrops(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             member = await chat.get_member(user.id)
             is_admin = member.status in [CMS.ADMINISTRATOR, CMS.OWNER]
-        except:
+        except Exception:
             pass
     if not is_admin:
         await update.message.reply_text("⛔ Only group admins or the bot owner can enable drops.")
         return
     await db.enable_drops(chat.id)
-    await update.message.reply_text("🎭 *Drops Enabled!*\n\nCharacters will now drop every hour.\nUse /guess <name> to guess the character!", parse_mode="Markdown")
+    await update.message.reply_text(
+        "🎭 *Drops Enabled!*\n\nCharacters will now drop every hour.\nUse /guess <n> to guess the character!",
+        parse_mode="Markdown"
+    )
 
 async def disabledrops(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
@@ -1222,13 +1412,16 @@ async def disabledrops(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             member = await chat.get_member(user.id)
             is_admin = member.status in [CMS.ADMINISTRATOR, CMS.OWNER]
-        except:
+        except Exception:
             pass
     if not is_admin:
         await update.message.reply_text("⛔ Only group admins or the bot owner can disable drops.")
         return
     await db.disable_drops(chat.id)
-    await update.message.reply_text("🚫 *Drops Disabled!*\n\nNo more automatic drops in this group.", parse_mode="Markdown")
+    await update.message.reply_text(
+        "🚫 *Drops Disabled!*\n\nNo more automatic drops in this group.",
+        parse_mode="Markdown"
+    )
 
 async def tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
@@ -1239,10 +1432,10 @@ async def tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await ensure_started(update, context):
         return
     ref_count, ref_earned = await db.get_referral_stats(user.id)
-    # Use global streak and char count so DM always shows real data
+    # Use global queries so DM always shows real data
     streak = await db.get_daily_streak_global(user.id)
     char_count = await db.get_user_char_count_global(user.id)
-    # Build text using HTML to avoid Markdown parse errors from user-supplied data
+    # HTML mode prevents task descriptions from breaking the message
     text = (
         f"📋 <b>Your Tasks</b>\n━━━━━━━━━━━━━━━━\n\n"
         f"📨 <b>Referral Task</b>\n"
@@ -1291,7 +1484,7 @@ async def tasks_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("❌ Task not found.")
         return
     if await db.is_task_completed(user.id, task_id):
-        await query.edit_message_text("✅ You already completed this task!")
+        await query.answer("✅ You already completed this task!", show_alert=True)
         return
     try:
         channel = task['target']
@@ -1304,7 +1497,11 @@ async def tasks_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if member.status in [CMS.MEMBER, CMS.ADMINISTRATOR, CMS.OWNER]:
             await db.complete_task(user.id, task_id, weekly=True)
             await db.add_coins(user.id, task['reward'])
-            await query.edit_message_text(f"🎉 *Task Complete!*\n\n✅ Joined {task['description']}\n💰 Reward: +{task['reward']} coins!", parse_mode="Markdown")
+            safe_desc = html_lib.escape(task['description'])
+            await query.edit_message_text(
+                f"🎉 <b>Task Complete!</b>\n\n✅ Joined {safe_desc}\n💰 Reward: +{task['reward']} coins!",
+                parse_mode="HTML"
+            )
         else:
             await query.answer("❌ You haven't joined the channel yet!", show_alert=True)
     except Exception:
@@ -1320,7 +1517,7 @@ async def refer(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     ref_link = f"https://t.me/{context.bot.username}?start=ref_{user.id}"
     ref_count, ref_earned = await db.get_referral_stats(user.id)
-    # Use HTML parse mode — the ref link contains underscores which break Markdown v1
+    # HTML mode — the ref link contains underscores that break Markdown v1
     text = (
         f"📨 <b>Your Referral Link</b>\n━━━━━━━━━━━━━━━━\n\n"
         f"🔗 <code>{html_lib.escape(ref_link)}</code>\n\n"
@@ -1330,6 +1527,35 @@ async def refer(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"💡 Share this link with friends!\n"
         f"   • You get 1000 coins per referral\n"
         f"   • They get 500 coins for joining"
+    )
+    await update.message.reply_text(text, parse_mode="HTML")
+
+async def leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    if chat.type not in ["group", "supergroup"]:
+        await update.message.reply_text("🏆 This command only works in groups!")
+        return
+    top_users = await db.get_leaderboard_data(limit=10)
+    if not top_users:
+        await update.message.reply_text("No collectors yet! Start collecting with /claim or /buy!")
+        return
+    medals = ["🥇", "🥈", "🥉"]
+    now = datetime.utcnow().strftime("%B %d, %Y")
+    text = (
+        f"╔══════════════════════════╗\n"
+        f"   🏆 <b>GLOBAL LEADERBOARD</b> 🏆\n"
+        f"╚══════════════════════════╝\n\n"
+    )
+    for i, user in enumerate(top_users):
+        medal = medals[i] if i < 3 else f"{i + 1}."
+        name = html_lib.escape(user.get('first_name') or f"User {user['user_id']}")
+        mention = f'<a href="tg://user?id={user["user_id"]}">{name}</a>'
+        text += f"{medal} {mention} — <b>{user['total']}</b> chars\n"
+    text += (
+        f"\n━━━━━━━━━━━━━━━━\n"
+        f"📅 <i>{now}</i>\n"
+        f"🎁 <i>Top 3 earn weekly prizes every Sunday!</i>\n"
+        f"💡 <i>Use /claim and /buy to collect more!</i>"
     )
     await update.message.reply_text(text, parse_mode="HTML")
 
@@ -1377,7 +1603,10 @@ async def addcharacter_price(update: Update, context: ContextTypes.DEFAULT_TYPE)
         rand_id = f"#{random.randint(0, 9999):04d}"
         if not await db.char_id_exists(rand_id):
             break
-    await db.add_character(rand_id, context.user_data['char_name'], context.user_data['char_anime'], context.user_data['char_img'], context.user_data['char_rarity'], price)
+    await db.add_character(
+        rand_id, context.user_data['char_name'], context.user_data['char_anime'],
+        context.user_data['char_img'], context.user_data['char_rarity'], price
+    )
     await update.message.reply_text(f"✅ Character added with ID {rand_id}")
     return ConversationHandler.END
 
@@ -1487,13 +1716,84 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     total_users = await db.get_total_users()
     active_today = await db.get_active_today()
-    text = f"📊 *Bot Statistics*\n━━━━━━━━━━━━━━━━\nTotal Users: {total_users}\nActive Today: {active_today}\n\n👤 *User List:*\n"
-    users = await db.get_all_users()
-    for i, u in enumerate(users[:50], 1):
-        text += f"{i}. User ID: `{u['user_id']}`\n"
-    if len(users) > 50:
-        text += f"\n... and {len(users) - 50} more users"
-    await update.message.reply_text(text, parse_mode="Markdown")
+    total_chars = await db.get_total_characters()
+    total_referrals = await db.get_total_referrals()
+
+    # -- Overview --
+    overview = (
+        f"📊 <b>Bot Statistics</b>\n"
+        f"━━━━━━━━━━━━━━━━\n"
+        f"👥 Total Users: <b>{total_users:,}</b>\n"
+        f"🟢 Active Today: <b>{active_today:,}</b>\n"
+        f"🎴 Total Characters: <b>{total_chars:,}</b>\n"
+        f"📨 Total Referrals: <b>{total_referrals:,}</b>\n"
+    )
+    await update.message.reply_text(overview, parse_mode="HTML")
+
+    # -- Groups List --
+    groups_info = await db.get_all_groups_info()
+    if groups_info:
+        grp_text = f"🏘 <b>Groups ({len(groups_info)})</b>\n━━━━━━━━━━━━━━━━\n\n"
+        for g in groups_info:
+            title = html_lib.escape(g.get('title') or '〔Unknown Group〕')
+            grp_text += f"📌 <b>{title}</b>\n🆔 <code>{g['group_id']}</code>\n\n"
+        # Split into chunks of 4096 chars
+        if len(grp_text) <= 4096:
+            await update.message.reply_text(grp_text, parse_mode="HTML")
+        else:
+            lines = grp_text.split("\n\n")
+            chunk = f"🏘 <b>Groups ({len(groups_info)})</b>\n━━━━━━━━━━━━━━━━\n\n"
+            for line in lines[1:]:
+                if len(chunk) + len(line) + 2 > 4096:
+                    await update.message.reply_text(chunk, parse_mode="HTML")
+                    chunk = ""
+                chunk += line + "\n\n"
+            if chunk.strip():
+                await update.message.reply_text(chunk, parse_mode="HTML")
+
+    # -- Users List (chunked) --
+    users = await db.get_all_users_info()
+    if users:
+        CHUNK = 30
+        for i in range(0, len(users), CHUNK):
+            chunk = users[i:i + CHUNK]
+            user_text = f"👤 <b>Users {i + 1}–{i + len(chunk)}</b>\n━━━━━━━━━━━━━━━━\n\n"
+            for u in chunk:
+                name = html_lib.escape(u.get('first_name') or '〔Unknown〕')
+                uname = f"@{html_lib.escape(u['username'])}" if u.get('username') else "no username"
+                user_text += f"• <b>{name}</b> ({uname})\n  🆔 <code>{u['user_id']}</code>\n"
+            await update.message.reply_text(user_text, parse_mode="HTML")
+
+async def groupmembers(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_owner(update.effective_user.id):
+        await update.message.reply_text("⛔ Owner only.")
+        return
+    if not context.args:
+        await update.message.reply_text("Usage: /groupmembers <group_id>")
+        return
+    try:
+        group_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("Group ID must be a number.")
+        return
+    members = await db.get_group_members_info(group_id)
+    if not members:
+        await update.message.reply_text("No members found for this group.")
+        return
+    try:
+        chat = await context.bot.get_chat(group_id)
+        title = html_lib.escape(chat.title or str(group_id))
+    except Exception:
+        title = str(group_id)
+    CHUNK = 30
+    for i in range(0, len(members), CHUNK):
+        chunk = members[i:i + CHUNK]
+        text = f"👥 <b>{title} — Members {i + 1}–{i + len(chunk)}</b>\n━━━━━━━━━━━━━━━━\n\n"
+        for m in chunk:
+            name = html_lib.escape(m.get('first_name') or '〔Unknown〕')
+            uname = f"@{html_lib.escape(m['username'])}" if m.get('username') else "no username"
+            text += f"• <b>{name}</b> ({uname})\n  🆔 <code>{m['user_id']}</code>\n"
+        await update.message.reply_text(text, parse_mode="HTML")
 
 async def addtask(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_owner(update.effective_user.id):
@@ -1532,14 +1832,21 @@ async def listtasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_owner(update.effective_user.id):
         await update.message.reply_text("⛔ Owner only.")
         return
-    tasks = await db.get_tasks()
-    if not tasks:
+    all_tasks = await db.get_tasks()
+    if not all_tasks:
         await update.message.reply_text("No tasks found.")
         return
-    text = "📋 *All Tasks*\n━━━━━━━━━━━━━━━━\n"
-    for t in tasks:
-        text += f"ID: `{t['task_id']}` | Type: {t['type']}\nTarget: {t['target']}\nReward: {t['reward']} coins\nDesc: {t['description']}\n\n"
-    await update.message.reply_text(text, parse_mode="Markdown")
+    text = "📋 <b>All Tasks</b>\n━━━━━━━━━━━━━━━━\n\n"
+    for t in all_tasks:
+        safe_desc = html_lib.escape(t['description'])
+        safe_target = html_lib.escape(t['target'])
+        text += (
+            f"🆔 <code>{t['task_id']}</code> | Type: {t['type']}\n"
+            f"🎯 Target: {safe_target}\n"
+            f"💰 Reward: {t['reward']} coins\n"
+            f"📝 {safe_desc}\n\n"
+        )
+    await update.message.reply_text(text, parse_mode="HTML")
 
 async def listadmins(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
@@ -1551,8 +1858,10 @@ async def listadmins(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not human_admins:
         await update.message.reply_text("No human admins found.")
         return
-    text = "👥 *Human Admins*\n" + "\n".join(f"• {a.full_name}" for a in human_admins)
-    await update.message.reply_text(text, parse_mode="Markdown")
+    text = "👥 <b>Human Admins</b>\n" + "\n".join(
+        f"• <a href='tg://user?id={a.id}'>{html_lib.escape(a.full_name)}</a>" for a in human_admins
+    )
+    await update.message.reply_text(text, parse_mode="HTML")
 
 async def calladmins(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
@@ -1580,8 +1889,17 @@ async def welcome_new_members(update: Update, context: ContextTypes.DEFAULT_TYPE
     for member in update.message.new_chat_members:
         if member.is_bot:
             continue
-        mention = f'<a href="tg://user?id={member.id}">{member.first_name}</a>'
-        welcome_text = f"👋 Welcome to <b>{chat.title}</b>, {mention}!\n━━━━━━━━━━━━━━━━\n🎮 Use /start to begin your adventure\n💰 Claim daily coins with /daily\n🎴 Get your first character with /claim\n🛒 Browse the /market for more!"
+        # Save user info when they join
+        await db.update_user_info(member.id, member.first_name, member.username)
+        mention = f'<a href="tg://user?id={member.id}">{html_lib.escape(member.first_name)}</a>'
+        welcome_text = (
+            f"👋 Welcome to <b>{html_lib.escape(chat.title)}</b>, {mention}!\n"
+            f"━━━━━━━━━━━━━━━━\n"
+            f"🎮 Use /start to begin your adventure\n"
+            f"💰 Claim daily coins with /daily\n"
+            f"🎴 Get your first character with /claim\n"
+            f"🛒 Browse the /market for more!"
+        )
         welcome_img = await db.get_group_welcome_img(chat.id)
         if welcome_img:
             await update.message.reply_photo(welcome_img, caption=welcome_text, parse_mode="HTML")
@@ -1590,17 +1908,40 @@ async def welcome_new_members(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 async def bot_added_to_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_member = update.chat_member
+    if not chat_member:
+        return
     if chat_member.new_chat_member.user.id == context.bot.id and chat_member.new_chat_member.status == CMS.ADMINISTRATOR:
         adder_id = chat_member.from_user.id
         group_id = chat_member.chat.id
+        group_title = chat_member.chat.title or str(group_id)
+        # Save group title for stats
+        await db.update_group_title(group_id, group_title)
         await db.record_group_add(adder_id, group_id)
         if not await db.is_group_add_rewarded(group_id):
             await db.reward_group_add(adder_id, group_id)
             await db.add_coins(adder_id, 5000)
             try:
-                await context.bot.send_message(adder_id, f"🎉 *Thanks for adding me to {chat_member.chat.title}!*\n\n💰 You earned 5000 coins!\nUse /tasks to see more ways to earn!", parse_mode="Markdown")
-            except:
+                await context.bot.send_message(
+                    adder_id,
+                    f"🎉 <b>Thanks for adding me to {html_lib.escape(group_title)}!</b>\n\n"
+                    f"💰 You earned <b>5000 coins!</b>\n"
+                    f"Use /tasks to see more ways to earn!",
+                    parse_mode="HTML"
+                )
+            except Exception:
                 pass
+
+# ---------- Global Error Handler ----------
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    """Log all exceptions to console and reply to user so they're never left hanging."""
+    import traceback
+    tb = "".join(traceback.format_exception(None, context.error, context.error.__traceback__))
+    print(f"[ERROR] Exception while handling update:\n{tb}")
+    if isinstance(update, Update) and update.message:
+        try:
+            await update.message.reply_text("⚠️ An error occurred. Please try again.")
+        except Exception:
+            pass
 
 # ---------- Web Preview (FastAPI) ----------
 HTML_TEMPLATE = """
@@ -1641,7 +1982,7 @@ HTML_TEMPLATE = """
         .info { margin-top: 16px; }
         .name {
             font-size: 1.8rem; font-weight: bold;
-            background: linear-gradient(135deg, #FFD966, #FF8C42);
+            background: linear-gradient(90deg, #a78bfa, #f472b6);
             -webkit-background-clip: text; background-clip: text;
             color: transparent; margin-bottom: 6px;
         }
@@ -1739,6 +2080,7 @@ HTML_TEMPLATE = """
 </html>
 """
 
+# ---------- FastAPI App ----------
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
@@ -1749,55 +2091,68 @@ async def store_page():
 @app.get("/api/characters")
 async def api_characters():
     chars, _ = await db.get_market_characters(limit=500, offset=0)
-    return [{"char_id": c["char_id"], "name": c["name"], "anime": c["anime"], "img_url": c["img_url"], "rarity": c["rarity"], "price": c["price"]} for c in chars]
+    return [
+        {"char_id": c["char_id"], "name": c["name"], "anime": c["anime"],
+         "img_url": c["img_url"], "rarity": c["rarity"], "price": c["price"]}
+        for c in chars
+    ]
 
-# ---------- Global Error Handler ----------
-async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-    """Log all unhandled exceptions so they're visible in console instead of silent."""
-    import traceback
-    tb = "".join(traceback.format_exception(None, context.error, context.error.__traceback__))
-    print(f"[ERROR] Exception while handling update:\n{tb}")
-    if isinstance(update, Update) and update.message:
-        try:
-            await update.message.reply_text("⚠️ An error occurred. Please try again.")
-        except Exception:
-            pass
+@app.post("/webhook")
+async def telegram_webhook(request: Request):
+    """Receives Telegram updates when WEBHOOK_URL is set."""
+    if bot_application is None:
+        return {"ok": False, "error": "Bot not ready"}
+    data = await request.json()
+    update = Update.de_json(data, bot_application.bot)
+    await bot_application.process_update(update)
+    return {"ok": True}
 
 # ---------- Main Entry Point ----------
 async def run_bot():
+    global bot_application
     await db.connect()
     await db.init_tables()
-    application = Application.builder().token(BOT_TOKEN).build()
-    application.add_error_handler(error_handler)
+
+    if WEBHOOK_URL:
+        # Webhook mode: disable PTB's built-in updater, FastAPI handles updates
+        bot_application = Application.builder().token(BOT_TOKEN).updater(None).build()
+    else:
+        # Polling mode: PTB manages its own updater
+        bot_application = Application.builder().token(BOT_TOKEN).build()
+
+    bot_application.add_error_handler(error_handler)
 
     # User commands
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("daily", daily))
-    application.add_handler(CommandHandler("claim", claim))
-    application.add_handler(CommandHandler("wallet", wallet))
-    application.add_handler(CommandHandler("vault", vault))
-    application.add_handler(CommandHandler("mycollection", vault))
-    application.add_handler(CommandHandler("market", market))
-    application.add_handler(CommandHandler("buy", buy))
-    application.add_handler(CommandHandler("sell", sell))
-    application.add_handler(CommandHandler("search", search))
+    bot_application.add_handler(CommandHandler("start", start))
+    bot_application.add_handler(CommandHandler("help", help_command))
+    bot_application.add_handler(CommandHandler("daily", daily))
+    bot_application.add_handler(CommandHandler("claim", claim))
+    bot_application.add_handler(CommandHandler("wallet", wallet))
+    bot_application.add_handler(CommandHandler("vault", vault))
+    bot_application.add_handler(CommandHandler("mycollection", vault))
+    bot_application.add_handler(CommandHandler("market", market))
+    bot_application.add_handler(CommandHandler("buy", buy))
+    bot_application.add_handler(CommandHandler("sell", sell))
+    bot_application.add_handler(CommandHandler("search", search))
 
     # Drop system
-    application.add_handler(CommandHandler("guess", guess))
-    application.add_handler(CommandHandler("enabledrops", enabledrops))
-    application.add_handler(CommandHandler("disabledrops", disabledrops))
+    bot_application.add_handler(CommandHandler("guess", guess))
+    bot_application.add_handler(CommandHandler("enabledrops", enabledrops))
+    bot_application.add_handler(CommandHandler("disabledrops", disabledrops))
+
+    # Leaderboard
+    bot_application.add_handler(CommandHandler("leaderboard", leaderboard))
 
     # Tasks
-    application.add_handler(CommandHandler("tasks", tasks))
-    application.add_handler(CommandHandler("refer", refer))
-    application.add_handler(CallbackQueryHandler(tasks_callback, pattern=r'^task:'))
+    bot_application.add_handler(CommandHandler("tasks", tasks))
+    bot_application.add_handler(CommandHandler("refer", refer))
+    bot_application.add_handler(CallbackQueryHandler(tasks_callback, pattern=r'^task:'))
 
     # Group admin
-    application.add_handler(CommandHandler("listadmins", listadmins))
-    application.add_handler(CommandHandler("calladmins", calladmins))
+    bot_application.add_handler(CommandHandler("listadmins", listadmins))
+    bot_application.add_handler(CommandHandler("calladmins", calladmins))
 
-    # Owner
+    # Owner commands
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("addcharacter", addcharacter_start)],
         states={
@@ -1809,33 +2164,41 @@ async def run_bot():
         },
         fallbacks=[CommandHandler("cancel", cancel_add)],
     )
-    application.add_handler(conv_handler)
-    application.add_handler(CommandHandler("remove", remove_character))
-    application.add_handler(CommandHandler("listchar", listchar))
-    application.add_handler(CommandHandler("addcoins", addcoins))
-    application.add_handler(CommandHandler("removecoins", removecoins))
-    application.add_handler(CommandHandler("setstartvid", setstartvid))
-    application.add_handler(CommandHandler("setwelcomepic", setwelcomepic))
-    application.add_handler(CommandHandler("resetgrpdata", resetgrpdata))
-    application.add_handler(CommandHandler("stats", stats))
-    application.add_handler(CommandHandler("addtask", addtask))
-    application.add_handler(CommandHandler("removetask", removetask))
-    application.add_handler(CommandHandler("listtasks", listtasks))
+    bot_application.add_handler(conv_handler)
+    bot_application.add_handler(CommandHandler("remove", remove_character))
+    bot_application.add_handler(CommandHandler("listchar", listchar))
+    bot_application.add_handler(CommandHandler("addcoins", addcoins))
+    bot_application.add_handler(CommandHandler("removecoins", removecoins))
+    bot_application.add_handler(CommandHandler("setstartvid", setstartvid))
+    bot_application.add_handler(CommandHandler("setwelcomepic", setwelcomepic))
+    bot_application.add_handler(CommandHandler("resetgrpdata", resetgrpdata))
+    bot_application.add_handler(CommandHandler("stats", stats))
+    bot_application.add_handler(CommandHandler("groupmembers", groupmembers))
+    bot_application.add_handler(CommandHandler("addtask", addtask))
+    bot_application.add_handler(CommandHandler("removetask", removetask))
+    bot_application.add_handler(CommandHandler("listtasks", listtasks))
 
-    # Welcome & group add
-    application.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome_new_members))
-    application.add_handler(ChatMemberHandler(bot_added_to_group, ChatMemberHandler.CHAT_MEMBER))
+    # Welcome & group tracking
+    bot_application.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome_new_members))
+    bot_application.add_handler(ChatMemberHandler(bot_added_to_group, ChatMemberHandler.CHAT_MEMBER))
 
     # Pagination callbacks
-    application.add_handler(CallbackQueryHandler(market_callback, pattern=r'^mkt:'))
-    application.add_handler(CallbackQueryHandler(vault_callback, pattern=r'^vlt:'))
+    bot_application.add_handler(CallbackQueryHandler(market_callback, pattern=r'^mkt:'))
+    bot_application.add_handler(CallbackQueryHandler(vault_callback, pattern=r'^vlt:'))
 
-    await start_drop_scheduler(application.bot)
-    await application.initialize()
-    await application.start()
-    await application.updater.start_polling()
-    print("Bot started...")
-    return application
+    await start_drop_scheduler(bot_application.bot)
+    await bot_application.initialize()
+    await bot_application.start()
+
+    if WEBHOOK_URL:
+        await bot_application.bot.set_webhook(f"{WEBHOOK_URL}/webhook")
+        print(f"✅ Bot started with WEBHOOK: {WEBHOOK_URL}/webhook")
+        # FastAPI serves the webhook — no polling needed
+    else:
+        await bot_application.updater.start_polling()
+        print("✅ Bot started with POLLING (set WEBHOOK_URL env var for production)")
+
+    return bot_application
 
 async def run_web():
     port = int(os.getenv("PORT", 8000))
