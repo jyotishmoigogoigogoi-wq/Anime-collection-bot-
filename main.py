@@ -1013,53 +1013,53 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Welcome to Anime Character Collector Bot!\nUse /help to see commands.", reply_markup=keyboard)
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = """🎮 *Available Commands*
+    text = (
+        "━━━〔 ⚡ HELP PANEL ⚡ 〕━━━\n\n"
 
-*💰 Economy*
-/daily - Claim coins (every 2h, per group)
-/claim - Claim random character (every 11h, per group)
-/wallet - Show your coins
+        "💰 EARN COINS\n"
+        "➤ /daily — Claim coins (every 2h)\n"
+        "➤ /claim — Get random character (every 11h)\n"
+        "➤ /tasks — Complete tasks (DM only)\n"
+        "➤ /refer — Get referral link (DM only)\n\n"
 
-*📦 Collection*
-/vault - Your collected characters (per group)
-/market - View buyable characters
-/buy <id> [id2 ...] - Buy character(s)
-/sell <id> - Sell character (70% refund)
-/search <n> - Search characters
+        "📦 COLLECTION\n"
+        "➤ /vault — Your characters\n"
+        "➤ /wallet — View coins & stats\n"
+        "➤ /market — Browse store\n"
+        "➤ /buy <id> — Purchase character\n"
+        "➤ /sell <id> — Sell character (70% refund)\n"
+        "➤ /search <name> — Search characters\n\n"
 
-*🎭 Drop System (Groups)*
-/guess <n> - Guess the dropped character
-/enabledrops - Enable drops (admin/owner)
-/disabledrops - Disable drops (admin/owner)
+        "🎭 DROP SYSTEM\n"
+        "➤ /guess <name> — Guess the drop\n\n"
 
-*🏆 Leaderboard (Groups)*
-/leaderboard - View top global collectors
-_(Auto-posts & pins every Sunday with prizes!)_
+        "🏆 RANKING\n"
+        "➤ /leaderboard — Top collectors\n\n"
 
-*📋 Tasks (DM Only)*
-/tasks - View and complete tasks
-/refer - Get your referral link
+        "👥 GROUP ADMIN\n"
+        "➤ /enabledrops — Enable drops\n"
+        "➤ /disabledrops — Disable drops\n"
+        "➤ /listadmins — List admins\n"
+        "➤ /calladmins — Mention all admins\n"
+        "➤ /setwelcomepic — Set welcome image\n\n"
 
-*👥 Group Admin*
-/listadmins - List human admins
-/calladmins - Mention all admins (10min cooldown)
+        "👑 OWNER ONLY\n"
+        "➤ /addcharacter — Add new character\n"
+        "➤ /remove <id> — Remove character\n"
+        "➤ /listchar — List all characters\n"
+        "➤ /addcoins — Add coins (reply to user)\n"
+        "➤ /removecoins — Remove coins (reply to user)\n"
+        "➤ /setstartvid — Set start video\n"
+        "➤ /resetgrpdata — Reset group data ⚠️\n"
+        "➤ /stats — Bot statistics\n"
+        "➤ /groupmembers <id> — View group members\n"
+        "➤ /addtask — Add task\n"
+        "➤ /removetask <id> — Remove task\n"
+        "➤ /listtasks — List all tasks\n\n"
 
-*👑 Owner/Dev*
-/addcharacter - Add new character (interactive)
-/remove <id> - Remove character
-/listchar - List all characters (IDs)
-/addcoins (reply) - Add coins
-/removecoins (reply) - Remove coins
-/setstartvid (reply to video)
-/setwelcomepic (reply to photo, in group)
-/resetgrpdata - Reset group data (danger)
-/stats - Bot statistics
-/groupmembers <id> - Members of a group
-
-*Other*
-/start - Start the bot
-/help - This menu"""
-    await update.message.reply_text(text, parse_mode="Markdown")
+        "━━━〔 🚀 USE SMARTLY 〕━━━"
+    )
+    await update.message.reply_text(text)
 
 async def daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -1223,9 +1223,7 @@ async def send_market_page(target, page: int, send_new: bool = True):
 
 async def market(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🌐 Open Web Store", url=WEB_STORE_URL)]])
-    await update.message.reply_text("🛒 *Character Market*\nBrowse in web store or use buttons below:", parse_mode="Markdown", reply_markup=keyboard)
-    page = int(context.args[0]) if context.args and context.args[0].isdigit() else 1
-    await send_market_page(update.message, page, send_new=True)
+    await update.message.reply_text("🛒 *Character Market*\nBrowse all characters in the web store 👇", parse_mode="Markdown", reply_markup=keyboard)
 
 async def market_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
