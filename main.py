@@ -794,28 +794,58 @@ class Database:
             return [dict(r) for r in rows]
 
     async def get_random_character(self) -> Optional[dict]:
-        """Pick a weighted-random available character based on rarity drop rates."""
+        """Weighted-random character using SQL — no full table load."""
         async with self.pool.acquire() as conn:
-            rows = await conn.fetch('SELECT * FROM characters WHERE is_available = true')
-        if not rows:
-            return None
-        chars = [dict(r) for r in rows]
-        weights = [RARITY_WEIGHTS.get(c['rarity'], 1) for c in chars]
-        return random.choices(chars, weights=weights, k=1)[0]
-
-    async def get_random_unowned_character(self, user_id: int, group_id: int) -> Optional[dict]:
-        """Pick a weighted-random character this user doesn't own in this group."""
-        async with self.pool.acquire() as conn:
-            rows = await conn.fetch('''
+            row = await conn.fetchrow('''
                 SELECT * FROM characters
                 WHERE is_available = true
-                AND char_id NOT IN (SELECT char_id FROM inventory WHERE user_id = $1 AND group_id = $2)
+                ORDER BY -LOG(RANDOM()) / (
+                    CASE rarity
+                        WHEN 'Common'          THEN 40.0
+                        WHEN 'Uncommon'        THEN 25.0
+                        WHEN 'Elite'           THEN 15.0
+                        WHEN 'Epic'            THEN 8.0
+                        WHEN 'Waifu'           THEN 4.0
+                        WHEN 'Special Edition' THEN 3.0
+                        WHEN 'Legendary'       THEN 2.0
+                        WHEN 'Limited'         THEN 1.5
+                        WHEN 'Event'           THEN 1.0
+                        WHEN 'Mythic'          THEN 0.5
+                        ELSE 1.0
+                    END
+                )
+                LIMIT 1
+            ''')
+            return dict(row) if row else None
+
+    async def get_random_unowned_character(self, user_id: int, group_id: int) -> Optional[dict]:
+        """Weighted-random character the user doesn't own — no full table load."""
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow('''
+                SELECT * FROM characters
+                WHERE is_available = true
+                AND char_id NOT IN (
+                    SELECT char_id FROM inventory
+                    WHERE user_id = $1 AND group_id = $2
+                )
+                ORDER BY -LOG(RANDOM()) / (
+                    CASE rarity
+                        WHEN 'Common'          THEN 40.0
+                        WHEN 'Uncommon'        THEN 25.0
+                        WHEN 'Elite'           THEN 15.0
+                        WHEN 'Epic'            THEN 8.0
+                        WHEN 'Waifu'           THEN 4.0
+                        WHEN 'Special Edition' THEN 3.0
+                        WHEN 'Legendary'       THEN 2.0
+                        WHEN 'Limited'         THEN 1.5
+                        WHEN 'Event'           THEN 1.0
+                        WHEN 'Mythic'          THEN 0.5
+                        ELSE 1.0
+                    END
+                )
+                LIMIT 1
             ''', user_id, group_id)
-        if not rows:
-            return None
-        chars = [dict(r) for r in rows]
-        weights = [RARITY_WEIGHTS.get(c['rarity'], 1) for c in chars]
-        return random.choices(chars, weights=weights, k=1)[0]
+            return dict(row) if row else None
 
     # ---------- Inventory ----------
     async def add_to_inventory(self, user_id: int, group_id: int, char_id: str) -> bool:
