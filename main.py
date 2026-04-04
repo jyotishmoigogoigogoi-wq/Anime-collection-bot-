@@ -1,4 +1,5 @@
 import os
+import html as html_lib
 import asyncio
 import random
 from datetime import datetime, timedelta
@@ -299,6 +300,22 @@ class Database:
             return await conn.fetchval(
                 'SELECT daily_streak FROM group_user_data WHERE user_id = $1 AND group_id = $2',
                 user_id, group_id
+            ) or 0
+
+    async def get_daily_streak_global(self, user_id: int) -> int:
+        """Returns the highest daily streak this user has across all groups."""
+        async with self.pool.acquire() as conn:
+            return await conn.fetchval(
+                'SELECT COALESCE(MAX(daily_streak), 0) FROM group_user_data WHERE user_id = $1',
+                user_id
+            ) or 0
+
+    async def get_user_char_count_global(self, user_id: int) -> int:
+        """Returns the total distinct characters this user owns across all groups."""
+        async with self.pool.acquire() as conn:
+            return await conn.fetchval(
+                'SELECT COUNT(DISTINCT char_id) FROM inventory WHERE user_id = $1',
+                user_id
             ) or 0
 
     async def can_claim_character(self, user_id: int, group_id: int) -> bool:
@@ -1157,8 +1174,8 @@ async def guess(update: Update, context: ContextTypes.DEFAULT_TYPE):
         mention = f'<a href="tg://user?id={user.id}">{user.first_name}</a>'
         streak_text = f"\n🔥 x{streak} Streak!" if streak >= 3 else ""
         await update.message.reply_text(
-            f"✨ *CORRECT!* {mention} guessed *{char['name']}*!{streak_text}\n\n💰 Reward: +{reward} coins\n{reward_text}",
-            parse_mode="Markdown"
+            f"✨ <b>CORRECT!</b> {mention} guessed <b>{char['name']}</b>!{streak_text}\n\n💰 Reward: +{reward} coins\n{reward_text}",
+            parse_mode="HTML"
         )
         if streak >= 3:
             try:
@@ -1219,24 +1236,35 @@ async def tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if chat.type != "private":
         await update.message.reply_text("📋 Please use /tasks in DM (private chat) with me!")
         return
+    if not await ensure_started(update, context):
+        return
     ref_count, ref_earned = await db.get_referral_stats(user.id)
-    text = f"📋 *Your Tasks*\n━━━━━━━━━━━━━━━━\n\n📨 *Referral Task*\n   ✅ Refer friends and earn!\n   📊 Referred: {ref_count} users | Earned: {ref_earned} coins\n   💰 Reward: 1000 coins per referral\n\n"
+    # Use global streak and char count so DM always shows real data
+    streak = await db.get_daily_streak_global(user.id)
+    char_count = await db.get_user_char_count_global(user.id)
+    # Build text using HTML to avoid Markdown parse errors from user-supplied data
+    text = (
+        f"📋 <b>Your Tasks</b>\n━━━━━━━━━━━━━━━━\n\n"
+        f"📨 <b>Referral Task</b>\n"
+        f"   ✅ Refer friends and earn!\n"
+        f"   📊 Referred: {ref_count} users | Earned: {ref_earned} coins\n"
+        f"   💰 Reward: 1000 coins per referral\n\n"
+    )
     channel_tasks = await db.get_tasks("channel")
-    text += "📢 *Channel Join Tasks*\n"
+    text += "📢 <b>Channel Join Tasks</b>\n"
     if channel_tasks:
         for t in channel_tasks:
             completed = await db.is_task_completed(user.id, t['task_id'])
             status = "✅ Completed" if completed else "⏳ Pending"
-            text += f"   {status}: {t['description']} (+{t['reward']} coins)\n"
+            safe_desc = html_lib.escape(t['description'])
+            text += f"   {status}: {safe_desc} (+{t['reward']} coins)\n"
     else:
         text += "   No channel tasks available\n"
-    text += "\n➕ *Add Bot to Group*\n   ⏳ Add me to a group as admin (+5000 coins)\n\n🎁 *Bonus Tasks*\n"
-    streak = await db.get_daily_streak(user.id, 0)
+    text += "\n➕ <b>Add Bot to Group</b>\n   ⏳ Add me to a group as admin (+5000 coins)\n\n🎁 <b>Bonus Tasks</b>\n"
     streak_status = "✅" if streak >= 7 else "⏳"
     text += f"   {streak_status} 7-Day Streak ({streak}/7) (+3000 coins)\n"
     first_buy = await db.is_bonus_completed(user.id, 'first_buy')
     text += f"   {'✅' if first_buy else '⏳'} First Buy (+1500 coins)\n"
-    char_count = await db.get_user_char_count(user.id, 0)
     collector_done = await db.is_bonus_completed(user.id, 'collector')
     text += f"   {'✅' if collector_done else '⏳'} Collector ({char_count}/10 chars) (+2500 coins)\n"
     first_guess = await db.is_bonus_completed(user.id, 'first_guess')
@@ -1244,9 +1272,12 @@ async def tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     buttons = []
     for t in channel_tasks:
         if not await db.is_task_completed(user.id, t['task_id']):
-            buttons.append([InlineKeyboardButton(f"✅ Done: {t['description'][:30]}...", callback_data=f"task:{t['task_id']}")])
+            label = t['description'][:30]
+            if len(t['description']) > 30:
+                label += "..."
+            buttons.append([InlineKeyboardButton(f"✅ Done: {label}", callback_data=f"task:{t['task_id']}")])
     keyboard = InlineKeyboardMarkup(buttons) if buttons else None
-    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=keyboard)
+    await update.message.reply_text(text, parse_mode="HTML", reply_markup=keyboard)
 
 async def tasks_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1270,7 +1301,7 @@ async def tasks_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 username = username[1:]
             channel = f"@{username}"
         member = await context.bot.get_chat_member(channel, user.id)
-        if member.status in [CMS.MEMBER, CMS.ADMINISTRATOR, CMS.OWNER, CMS.CREATOR]:
+        if member.status in [CMS.MEMBER, CMS.ADMINISTRATOR, CMS.OWNER]:
             await db.complete_task(user.id, task_id, weekly=True)
             await db.add_coins(user.id, task['reward'])
             await query.edit_message_text(f"🎉 *Task Complete!*\n\n✅ Joined {task['description']}\n💰 Reward: +{task['reward']} coins!", parse_mode="Markdown")
@@ -1285,10 +1316,22 @@ async def refer(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if chat.type != "private":
         await update.message.reply_text("📨 Please use /refer in DM with me!")
         return
+    if not await ensure_started(update, context):
+        return
     ref_link = f"https://t.me/{context.bot.username}?start=ref_{user.id}"
     ref_count, ref_earned = await db.get_referral_stats(user.id)
-    text = f"📨 *Your Referral Link*\n━━━━━━━━━━━━━━━━\n\n🔗 {ref_link}\n\n📊 *Stats:*\n   👥 Referred: {ref_count} users\n   💰 Total earned: {ref_earned} coins\n\n💡 Share this link with friends!\n   • You get 1000 coins per referral\n   • They get 500 coins for joining"
-    await update.message.reply_text(text, parse_mode="Markdown")
+    # Use HTML parse mode — the ref link contains underscores which break Markdown v1
+    text = (
+        f"📨 <b>Your Referral Link</b>\n━━━━━━━━━━━━━━━━\n\n"
+        f"🔗 <code>{html_lib.escape(ref_link)}</code>\n\n"
+        f"📊 <b>Stats:</b>\n"
+        f"   👥 Referred: {ref_count} users\n"
+        f"   💰 Total earned: {ref_earned} coins\n\n"
+        f"💡 Share this link with friends!\n"
+        f"   • You get 1000 coins per referral\n"
+        f"   • They get 500 coins for joining"
+    )
+    await update.message.reply_text(text, parse_mode="HTML")
 
 # ---------- Owner/Dev Commands ----------
 async def addcharacter_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1708,11 +1751,24 @@ async def api_characters():
     chars, _ = await db.get_market_characters(limit=500, offset=0)
     return [{"char_id": c["char_id"], "name": c["name"], "anime": c["anime"], "img_url": c["img_url"], "rarity": c["rarity"], "price": c["price"]} for c in chars]
 
+# ---------- Global Error Handler ----------
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    """Log all unhandled exceptions so they're visible in console instead of silent."""
+    import traceback
+    tb = "".join(traceback.format_exception(None, context.error, context.error.__traceback__))
+    print(f"[ERROR] Exception while handling update:\n{tb}")
+    if isinstance(update, Update) and update.message:
+        try:
+            await update.message.reply_text("⚠️ An error occurred. Please try again.")
+        except Exception:
+            pass
+
 # ---------- Main Entry Point ----------
 async def run_bot():
     await db.connect()
     await db.init_tables()
     application = Application.builder().token(BOT_TOKEN).build()
+    application.add_error_handler(error_handler)
 
     # User commands
     application.add_handler(CommandHandler("start", start))
