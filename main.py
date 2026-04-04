@@ -52,17 +52,281 @@ NAME, ANIME, IMG_URL, RARITY, PRICE = range(5)
 scheduler = AsyncIOScheduler()
 bot_application = None
 
-# Salty messages for expired drops
-SALTY_MESSAGES = [
-    "No one guessed... what a fool group 🙄",
-    "50 minutes and nothing? Embarrassing 💀",
-    "The character was {name}... y'all really didn't know? 😂",
-    "Zero correct guesses. Zero. 💀",
-    "Even my grandma would have guessed that. Unbelievable.",
-    "Dropped the ball on this one, didn't you? 🏀❌",
-    "Mystery remains... because none of you tried hard enough 🤷",
-    "Y'all need to watch more anime. That was easy."
-]
+# ---------- Language Strings ----------
+STRINGS: Dict[str, Dict[str, Any]] = {
+    'en': {
+        'start_first': "❌ Please start the bot first with /start",
+        'welcome': "Welcome to Anime Character Collector Bot!\nUse /help to see commands.",
+        'daily_claimed': "💸 You claimed *{reward} coins*!\n💰 Total balance: `{coins}` coins{streak_text}",
+        'daily_streak': "\n🔥 Daily Streak: {streak} days",
+        'daily_streak_bonus': "\n🎉 *7-Day Streak Bonus!* +3000 coins!",
+        'daily_wait': "⏳ You already claimed daily coins here. Try again in 2 hours.",
+        'claim_wait': "⏳ You already claimed a character here. Try again in 11 hours.",
+        'claim_no_chars': "❌ No characters available. Contact the owner.",
+        'claim_all_owned': (
+            "🏆 *You own every character in this group's collection!*\n\n╭───────────────╮\n"
+            "💰 *Reward:* +10,000 Coins\n👜 *Balance:* {coins} Coins\n╰───────────────╯\n\n"
+            "⏳ Come back in 11 hours for your next claim!"
+        ),
+        'claim_caption': (
+            "{emoji} *{name}*\n╭───────────────╮\n🎬 Anime: {anime}\n💎 Tier: {emoji} {rarity}\n"
+            "🆔 Card ID: `{char_id}`\n💰 Value: {price} Coins\n╰───────────────╯\n\n"
+            "✨ A rare presence has been claimed…\n🌸 Grace\\. Power\\. Mystery — all in one\\.\n\n🔐 Status: Newly Claimed"
+        ),
+        'wallet_text': (
+            "👤 *{name}'s Wallet*\n━━━━━━━━━━━━━━━━\n💰 *Coins:* `{coins}` _(global)_\n"
+            "🎴 *Characters here:* `{char_count}`\n━━━━━━━━━━━━━━━━\n_/daily to earn coins • /vault to see collection_"
+        ),
+        'vault_empty': "📭 Your vault is empty here. Use /claim or /buy to get characters!",
+        'vault_caption': (
+            "{emoji} *{name}*\n╭───────────────╮\n🎬 Anime: {anime}\n💎 Tier: {emoji} {rarity}\n"
+            "🆔 Card ID: `{char_id}`\n💰 Value: {price} Coins\n╰───────────────╯\n\n_Card {page} of {total}_"
+        ),
+        'vault_not_yours': "⛔ This is not your vault!",
+        'market_text': "🛒 *Character Market*\nBrowse all characters in the web store 👇",
+        'buy_usage': "Usage: /buy <character_id> [id2 ...]",
+        'buy_no_coins': "❌ Insufficient coins. Need {total_cost}, you have {coins}.",
+        'buy_first_bonus': "🎉 *First Buy Bonus!* +1500 coins!",
+        'buy_success': "✅ Bought {count} character(s).\n",
+        'buy_failed': "⚠️ Failed: {items}",
+        'buy_not_found': "{id} (not found)",
+        'buy_already_owned': "{id} (already owned)",
+        'sell_usage': "Usage: /sell <character_id>",
+        'sell_not_found': "❌ Character not found.",
+        'sell_not_owned': "❌ You don't own this character.",
+        'sell_success': "💰 Sold <b>{name}</b> for <b>{price} coins</b> (70% of base).",
+        'search_usage': "Usage: /search <character name>",
+        'search_no_results': "No matching characters.",
+        'guess_groups_only': "🎭 This command only works in groups!",
+        'guess_usage': "Usage: /guess <character name>",
+        'guess_cooldown': "⏳ Please wait 10 seconds before guessing again.",
+        'guess_no_drop': "❌ No active drop right now. Wait for the next one!",
+        'guess_already_won': "🏆 Someone already guessed this character!",
+        'guess_error': "❌ Error loading character data.",
+        'guess_correct': "✨ <b>CORRECT!</b> {mention} guessed <b>{name}</b>!{streak_text}\n\n💰 Reward: +{reward} coins\n{reward_text}",
+        'guess_already_own': "💰 You already own this character, so you get 5000 coins instead!",
+        'guess_added': "🎴 {name} added to your vault!",
+        'guess_wrong': "❌ Wrong guess! Try again!",
+        'guess_streak': "\n🔥 x{streak} Streak!",
+        'guess_first_bonus': "🎉 <b>First Guess Win Bonus!</b> +1000 coins!",
+        'streak_msg': "🔥 <b>@{name} x{streak} streak!</b> 🔥",
+        'drops_groups_only': "This command only works in groups!",
+        'drops_enable_admin': "⛔ Only group admins or the bot owner can enable drops.",
+        'drops_enabled': "🎭 *Drops Enabled!*\n\nCharacters will now drop every hour.\nUse /guess <name> to guess the character!",
+        'drops_disable_admin': "⛔ Only group admins or the bot owner can disable drops.",
+        'drops_disabled': "🚫 *Drops Disabled!*\n\nNo more automatic drops in this group.",
+        'drop_guess_caption': "🎭 Guess the character!",
+        'drop_hint_caption': "🎭 Guess the character!\n\n💡 <b>Hint:</b> From <i>{anime}</i>",
+        'collector_bonus': "🎉 <b>Collector Bonus!</b> You own 10 characters in this group! +2500 coins!",
+        'tasks_dm_only': "📋 Please use /tasks in DM (private chat) with me!",
+        'tasks_header': "📋 <b>Your Tasks</b>\n━━━━━━━━━━━━━━━━\n\n",
+        'tasks_referral': (
+            "📨 <b>Referral Task</b>\n   ✅ Refer friends and earn!\n"
+            "   📊 Referred: {ref_count} users | Earned: {ref_earned} coins\n"
+            "   💰 Reward: 1000 coins per referral\n\n"
+        ),
+        'tasks_channel_header': "📢 <b>Channel Join Tasks</b>\n",
+        'tasks_no_channel': "   No channel tasks available\n",
+        'tasks_group_add': "\n➕ <b>Add Bot to Group</b>\n   ⏳ Add me to a group as admin (+5000 coins)\n\n",
+        'tasks_bonus_header': "🎁 <b>Bonus Tasks</b>\n",
+        'tasks_streak': "   {status} 7-Day Streak ({streak}/7) (+3000 coins)\n",
+        'tasks_first_buy': "   {status} First Buy (+1500 coins)\n",
+        'tasks_collector': "   {status} Collector ({count}/10 chars) (+2500 coins)\n",
+        'tasks_first_guess': "   {status} First Guess Win (+1000 coins)\n",
+        'tasks_done_btn': "✅ Done: {label}",
+        'tasks_complete': "🎉 <b>Task Complete!</b>\n\n✅ Joined {desc}\n💰 Reward: +{reward} coins!",
+        'tasks_not_joined': "❌ You haven't joined the channel yet!",
+        'tasks_verify_error': "❌ Error verifying membership. Make sure the bot is admin in the channel!",
+        'tasks_already_done': "✅ You already completed this task!",
+        'refer_dm_only': "📨 Please use /refer in DM with me!",
+        'refer_text': (
+            "📨 <b>Your Referral Link</b>\n━━━━━━━━━━━━━━━━\n\n🔗 <code>{link}</code>\n\n"
+            "📊 <b>Stats:</b>\n   👥 Referred: {ref_count} users\n   💰 Total earned: {ref_earned} coins\n\n"
+            "💡 Share this link with friends!\n   • You get 1000 coins per referral\n   • They get 500 coins for joining"
+        ),
+        'lb_groups_only': "🏆 This command only works in groups!",
+        'lb_empty': "No collectors yet! Start collecting with /claim or /buy!",
+        'lb_header': "╔══════════════════════════╗\n   🏆 <b>GLOBAL LEADERBOARD</b> 🏆\n╚══════════════════════════╝\n\n",
+        'lb_footer': "\n━━━━━━━━━━━━━━━━\n📅 <i>{date}</i>\n🎁 <i>Top 3 earn weekly prizes every Sunday!</i>\n💡 <i>Use /claim and /buy to collect more!</i>",
+        'weekly_lb_header': "╔══════════════════════════╗\n   🏆 <b>WEEKLY LEADERBOARD</b> 🏆\n╚══════════════════════════╝\n\n",
+        'weekly_lb_prizes': "\n━━━━━━━━━━━━━━━━\n🎊 <b>Weekly Prizes Distributed!</b>\n",
+        'weekly_lb_footer': "\n📅 <i>{date}</i> | 💡 <i>Collect more to climb the ranks!</i>",
+        'weekly_dm': (
+            "🎉 <b>Weekly Leaderboard Prize!</b>\n\nYou ranked <b>#{rank}</b> on the global collector leaderboard!\n"
+            "💰 <b>+{reward} coins</b> have been added to your wallet!\n\nKeep collecting to stay on top! 🏆"
+        ),
+        'welcome_member': (
+            "👋 Welcome to <b>{group}</b>, {mention}!\n━━━━━━━━━━━━━━━━\n"
+            "🎮 Use /start to begin your adventure\n💰 Claim daily coins with /daily\n"
+            "🎴 Get your first character with /claim\n🛒 Browse the /market for more!"
+        ),
+        'admins_groups_only': "This command only works in groups.",
+        'admins_none': "No human admins found.",
+        'admins_header': "👥 <b>Human Admins</b>\n",
+        'calladmins_groups_only': "Only in groups.",
+        'calladmins_cooldown': "⏳ Rate limit: once per 10 minutes per group.",
+        'calladmins_none': "No human admins to call.",
+        'calladmins_text': "Hey admins come fast 🙃\n",
+        'error': "⚠️ An error occurred. Please try again.",
+        'lang_choose': "🌐 Choose your language / Выберите язык:",
+        'lang_set_en': "✅ Language set to English!",
+        'lang_set_ru': "✅ Язык установлен: Русский!",
+        'bot_added_thanks': "🎉 <b>Thanks for adding me to {group}!</b>\n\n💰 You earned <b>5000 coins!</b>\nUse /tasks to see more ways to earn!",
+        'ref_notify': "🎉 <b>New Referral!</b>\n@{name} joined using your link!\n💰 You earned <b>1000 coins!</b>",
+        'salty': [
+            "No one guessed... what a fool group 🙄",
+            "50 minutes and nothing? Embarrassing 💀",
+            "The character was {name}... y'all really didn't know? 😂",
+            "Zero correct guesses. Zero. 💀",
+            "Even my grandma would have guessed that. Unbelievable.",
+            "Dropped the ball on this one, didn't you? 🏀❌",
+            "Mystery remains... because none of you tried hard enough 🤷",
+            "Y'all need to watch more anime. That was easy."
+        ],
+    },
+    'ru': {
+        'start_first': "❌ Пожалуйста, сначала запустите бота командой /start",
+        'welcome': "Добро пожаловать в Anime Character Collector Bot!\nИспользуйте /help для просмотра команд.",
+        'daily_claimed': "💸 Вы получили *{reward} монет*!\n💰 Баланс: `{coins}` монет{streak_text}",
+        'daily_streak': "\n🔥 Серия: {streak} дней",
+        'daily_streak_bonus': "\n🎉 *Бонус за 7 дней подряд!* +3000 монет!",
+        'daily_wait': "⏳ Вы уже получили ежедневные монеты. Попробуйте через 2 часа.",
+        'claim_wait': "⏳ Вы уже забрали персонажа. Попробуйте через 11 часов.",
+        'claim_no_chars': "❌ Персонажи недоступны. Обратитесь к владельцу.",
+        'claim_all_owned': (
+            "🏆 *Вы владеете всеми персонажами коллекции этой группы!*\n\n╭───────────────╮\n"
+            "💰 *Награда:* +10,000 Монет\n👜 *Баланс:* {coins} Монет\n╰───────────────╯\n\n"
+            "⏳ Возвращайтесь через 11 часов за следующим персонажем!"
+        ),
+        'claim_caption': (
+            "{emoji} *{name}*\n╭───────────────╮\n🎬 Аниме: {anime}\n💎 Уровень: {emoji} {rarity}\n"
+            "🆔 ID Карты: `{char_id}`\n💰 Стоимость: {price} Монет\n╰───────────────╯\n\n"
+            "✨ Редкое появление было заявлено…\n🌸 Грация\\. Сила\\. Загадка — всё в одном\\.\n\n🔐 Статус: Только что получен"
+        ),
+        'wallet_text': (
+            "👤 *Кошелёк {name}*\n━━━━━━━━━━━━━━━━\n💰 *Монеты:* `{coins}` _(глобально)_\n"
+            "🎴 *Персонажей здесь:* `{char_count}`\n━━━━━━━━━━━━━━━━\n_/daily для монет • /vault для коллекции_"
+        ),
+        'vault_empty': "📭 Ваше хранилище пусто. Используйте /claim или /buy!",
+        'vault_caption': (
+            "{emoji} *{name}*\n╭───────────────╮\n🎬 Аниме: {anime}\n💎 Уровень: {emoji} {rarity}\n"
+            "🆔 ID Карты: `{char_id}`\n💰 Стоимость: {price} Монет\n╰───────────────╯\n\n_Карта {page} из {total}_"
+        ),
+        'vault_not_yours': "⛔ Это не ваше хранилище!",
+        'market_text': "🛒 *Рынок персонажей*\nПросматривайте всех персонажей в веб-магазине 👇",
+        'buy_usage': "Использование: /buy <id> [id2 ...]",
+        'buy_no_coins': "❌ Недостаточно монет. Нужно {total_cost}, у вас {coins}.",
+        'buy_first_bonus': "🎉 *Бонус за первую покупку!* +1500 монет!",
+        'buy_success': "✅ Куплено {count} персонаж(ей).\n",
+        'buy_failed': "⚠️ Не удалось: {items}",
+        'buy_not_found': "{id} (не найден)",
+        'buy_already_owned': "{id} (уже в коллекции)",
+        'sell_usage': "Использование: /sell <id>",
+        'sell_not_found': "❌ Персонаж не найден.",
+        'sell_not_owned': "❌ Вы не владеете этим персонажем.",
+        'sell_success': "💰 Продан <b>{name}</b> за <b>{price} монет</b> (70% от базовой цены).",
+        'search_usage': "Использование: /search <имя персонажа>",
+        'search_no_results': "Совпадений не найдено.",
+        'guess_groups_only': "🎭 Эта команда работает только в группах!",
+        'guess_usage': "Использование: /guess <имя персонажа>",
+        'guess_cooldown': "⏳ Подождите 10 секунд перед следующей попыткой.",
+        'guess_no_drop': "❌ Сейчас нет активного дропа. Подождите следующего!",
+        'guess_already_won': "🏆 Кто-то уже угадал этого персонажа!",
+        'guess_error': "❌ Ошибка загрузки данных персонажа.",
+        'guess_correct': "✨ <b>ПРАВИЛЬНО!</b> {mention} угадал <b>{name}</b>!{streak_text}\n\n💰 Награда: +{reward} монет\n{reward_text}",
+        'guess_already_own': "💰 Вы уже владеете этим персонажем — получаете 5000 монет!",
+        'guess_added': "🎴 {name} добавлен в ваше хранилище!",
+        'guess_wrong': "❌ Неверно! Попробуйте ещё раз!",
+        'guess_streak': "\n🔥 x{streak} Серия!",
+        'guess_first_bonus': "🎉 <b>Бонус за первое угадывание!</b> +1000 монет!",
+        'streak_msg': "🔥 <b>@{name} x{streak} серия!</b> 🔥",
+        'drops_groups_only': "Эта команда работает только в группах!",
+        'drops_enable_admin': "⛔ Только администраторы группы или владелец бота могут включить дропы.",
+        'drops_enabled': "🎭 *Дропы включены!*\n\nПерсонажи появляются каждый час.\nИспользуйте /guess <имя> для угадывания!",
+        'drops_disable_admin': "⛔ Только администраторы группы или владелец бота могут отключить дропы.",
+        'drops_disabled': "🚫 *Дропы отключены!*\n\nАвтоматические дропы в этой группе остановлены.",
+        'drop_guess_caption': "🎭 Угадайте персонажа!",
+        'drop_hint_caption': "🎭 Угадайте персонажа!\n\n💡 <b>Подсказка:</b> Из аниме <i>{anime}</i>",
+        'collector_bonus': "🎉 <b>Бонус коллекционера!</b> У вас 10 персонажей в этой группе! +2500 монет!",
+        'tasks_dm_only': "📋 Пожалуйста, используйте /tasks в личных сообщениях!",
+        'tasks_header': "📋 <b>Ваши задания</b>\n━━━━━━━━━━━━━━━━\n\n",
+        'tasks_referral': (
+            "📨 <b>Реферальное задание</b>\n   ✅ Приглашайте друзей и зарабатывайте!\n"
+            "   📊 Приглашено: {ref_count} пользователей | Заработано: {ref_earned} монет\n"
+            "   💰 Награда: 1000 монет за реферала\n\n"
+        ),
+        'tasks_channel_header': "📢 <b>Задания по подписке на канал</b>\n",
+        'tasks_no_channel': "   Заданий по каналу нет\n",
+        'tasks_group_add': "\n➕ <b>Добавить бота в группу</b>\n   ⏳ Добавьте меня в группу как администратора (+5000 монет)\n\n",
+        'tasks_bonus_header': "🎁 <b>Бонусные задания</b>\n",
+        'tasks_streak': "   {status} 7-дневная серия ({streak}/7) (+3000 монет)\n",
+        'tasks_first_buy': "   {status} Первая покупка (+1500 монет)\n",
+        'tasks_collector': "   {status} Коллекционер ({count}/10 персонажей) (+2500 монет)\n",
+        'tasks_first_guess': "   {status} Первое угадывание (+1000 монет)\n",
+        'tasks_done_btn': "✅ Готово: {label}",
+        'tasks_complete': "🎉 <b>Задание выполнено!</b>\n\n✅ Подписались на {desc}\n💰 Награда: +{reward} монет!",
+        'tasks_not_joined': "❌ Вы ещё не подписались на канал!",
+        'tasks_verify_error': "❌ Ошибка проверки. Убедитесь, что бот является администратором канала!",
+        'tasks_already_done': "✅ Вы уже выполнили это задание!",
+        'refer_dm_only': "📨 Пожалуйста, используйте /refer в личных сообщениях!",
+        'refer_text': (
+            "📨 <b>Ваша реферальная ссылка</b>\n━━━━━━━━━━━━━━━━\n\n🔗 <code>{link}</code>\n\n"
+            "📊 <b>Статистика:</b>\n   👥 Приглашено: {ref_count} пользователей\n   💰 Заработано: {ref_earned} монет\n\n"
+            "💡 Поделитесь ссылкой с друзьями!\n   • Вы получаете 1000 монет за реферала\n   • Друг получает 500 монет"
+        ),
+        'lb_groups_only': "🏆 Эта команда работает только в группах!",
+        'lb_empty': "Коллекционеров пока нет! Начните с /claim или /buy!",
+        'lb_header': "╔══════════════════════════╗\n   🏆 <b>ГЛОБАЛЬНЫЙ РЕЙТИНГ</b> 🏆\n╚══════════════════════════╝\n\n",
+        'lb_footer': "\n━━━━━━━━━━━━━━━━\n📅 <i>{date}</i>\n🎁 <i>Топ-3 получают призы каждое воскресенье!</i>\n💡 <i>Используйте /claim и /buy для пополнения!</i>",
+        'weekly_lb_header': "╔══════════════════════════╗\n   🏆 <b>ЕЖЕНЕДЕЛЬНЫЙ РЕЙТИНГ</b> 🏆\n╚══════════════════════════╝\n\n",
+        'weekly_lb_prizes': "\n━━━━━━━━━━━━━━━━\n🎊 <b>Еженедельные призы распределены!</b>\n",
+        'weekly_lb_footer': "\n📅 <i>{date}</i> | 💡 <i>Собирайте больше для продвижения!</i>",
+        'weekly_dm': (
+            "🎉 <b>Приз еженедельного рейтинга!</b>\n\nВы заняли <b>#{rank}</b> место в глобальном рейтинге!\n"
+            "💰 <b>+{reward} монет</b> добавлены в ваш кошелёк!\n\nПродолжайте собирать! 🏆"
+        ),
+        'welcome_member': (
+            "👋 Добро пожаловать в <b>{group}</b>, {mention}!\n━━━━━━━━━━━━━━━━\n"
+            "🎮 Используйте /start для начала\n💰 Ежедневные монеты: /daily\n"
+            "🎴 Первый персонаж: /claim\n🛒 Магазин: /market"
+        ),
+        'admins_groups_only': "Эта команда работает только в группах.",
+        'admins_none': "Администраторы-люди не найдены.",
+        'admins_header': "👥 <b>Администраторы</b>\n",
+        'calladmins_groups_only': "Только в группах.",
+        'calladmins_cooldown': "⏳ Ограничение: раз в 10 минут для группы.",
+        'calladmins_none': "Нет администраторов для вызова.",
+        'calladmins_text': "Эй, администраторы, скорее сюда 🙃\n",
+        'error': "⚠️ Произошла ошибка. Пожалуйста, попробуйте снова.",
+        'lang_choose': "🌐 Choose your language / Выберите язык:",
+        'lang_set_en': "✅ Language set to English!",
+        'lang_set_ru': "✅ Язык установлен: Русский!",
+        'bot_added_thanks': "🎉 <b>Спасибо, что добавили меня в {group}!</b>\n\n💰 Вы заработали <b>5000 монет!</b>\nИспользуйте /tasks для других способов заработка!",
+        'ref_notify': "🎉 <b>Новый реферал!</b>\n@{name} присоединился по вашей ссылке!\n💰 Вы заработали <b>1000 монет!</b>",
+        'salty': [
+            "Никто не угадал... какая беспомощная группа 🙄",
+            "50 минут — и ничего? Позор 💀",
+            "Персонаж был {name}... вы правда не знали? 😂",
+            "Ноль правильных ответов. Ноль. 💀",
+            "Даже моя бабушка угадала бы. Невероятно.",
+            "Упустили мяч, не так ли? 🏀❌",
+            "Загадка остаётся... потому что никто не старался 🤷",
+            "Вам нужно смотреть больше аниме. Это было легко."
+        ],
+    }
+}
+
+def t(lang: str, key: str, **kwargs) -> str:
+    """Return translated string for given language and key."""
+    s = STRINGS.get(lang, STRINGS['en']).get(key)
+    if s is None:
+        s = STRINGS['en'].get(key, key)
+    if kwargs and isinstance(s, str):
+        try:
+            s = s.format(**kwargs)
+        except (KeyError, IndexError):
+            pass
+    return s
 
 # ---------- Database Layer ----------
 class Database:
@@ -92,6 +356,10 @@ class Database:
             ''')
             await conn.execute('''
                 ALTER TABLE group_user_data ADD COLUMN IF NOT EXISTS last_daily_date DATE
+            ''')
+            # Migration: add language column to user_info
+            await conn.execute('''
+                ALTER TABLE user_info ADD COLUMN IF NOT EXISTS language TEXT DEFAULT 'en'
             ''')
             await conn.execute('''
                 CREATE TABLE IF NOT EXISTS users (
@@ -228,6 +496,18 @@ class Database:
                 ON CONFLICT (user_id) DO UPDATE
                 SET first_name = $2, username = $3, updated_at = NOW()
             ''', user_id, first_name, username)
+
+    async def get_user_lang(self, user_id: int) -> str:
+        async with self.pool.acquire() as conn:
+            lang = await conn.fetchval('SELECT language FROM user_info WHERE user_id = $1', user_id)
+            return lang if lang in ('en', 'ru') else 'en'
+
+    async def set_user_lang(self, user_id: int, lang: str):
+        async with self.pool.acquire() as conn:
+            await conn.execute('''
+                INSERT INTO user_info (user_id, language) VALUES ($1, $2)
+                ON CONFLICT (user_id) DO UPDATE SET language = $2
+            ''', user_id, lang)
 
     # ---------- User tracking ----------
     async def user_has_started(self, user_id: int) -> bool:
@@ -782,9 +1062,9 @@ async def ensure_started(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not user:
         return False
     if not await db.user_has_started(user.id):
-        await update.message.reply_text("❌ Please start the bot first with /start")
+        lang = await db.get_user_lang(user.id)
+        await update.message.reply_text(t(lang, 'start_first'))
         return False
-    # Keep user info fresh on every interaction
     await db.update_user_info(user.id, user.first_name, user.username)
     return True
 
@@ -813,12 +1093,10 @@ async def check_collector_bonus(user_id: int, group_id: int, update: Update):
         return
     count = await db.get_user_char_count(user_id, group_id)
     if count >= 10:
+        lang = await db.get_user_lang(user_id)
         await db.complete_bonus(user_id, 'collector')
         await db.add_coins(user_id, 2500)
-        await update.message.reply_text(
-            "🎉 <b>Collector Bonus!</b> You own 10 characters in this group! +2500 coins!",
-            parse_mode="HTML"
-        )
+        await update.message.reply_text(t(lang, 'collector_bonus'), parse_mode="HTML")
 
 # ---------- Drop System Jobs ----------
 async def perform_drop(bot, group_id: int):
@@ -833,7 +1111,7 @@ async def perform_drop(bot, group_id: int):
         msg = await bot.send_photo(
             chat_id=group_id,
             photo=char['img_url'],
-            caption="🎭 Guess the character!"
+            caption=t('en', 'drop_guess_caption')
         )
         try:
             await bot.pin_chat_message(group_id, msg.message_id)
@@ -870,7 +1148,7 @@ async def show_drop_hint(bot, group_id: int):
         await bot.edit_message_caption(
             chat_id=group_id,
             message_id=drop['message_id'],
-            caption=f"🎭 Guess the character!\n\n💡 <b>Hint:</b> From <i>{anime}</i>",
+            caption=t('en', 'drop_hint_caption', anime=anime),
             parse_mode="HTML"
         )
         await db.show_hint(group_id)
@@ -889,7 +1167,7 @@ async def expire_drop(bot, group_id: int):
         await bot.unpin_chat_message(group_id, drop['message_id'])
     except Exception:
         pass
-    msg = random.choice(SALTY_MESSAGES).replace("{name}", char['name'])
+    msg = random.choice(t('en', 'salty')).replace("{name}", char['name'])
     await bot.send_message(group_id, msg)
     await db.end_drop(group_id)
     await db.reset_win_streak(group_id)
@@ -904,12 +1182,12 @@ async def send_weekly_leaderboard(bot):
     prizes = [3000, 2000, 1000]
     now = datetime.utcnow().strftime("%B %d, %Y")
 
-    # Distribute prizes to top 3 and notify them in DM
     prize_lines = []
     for i, reward in enumerate(prizes):
         if i >= len(top_users):
             break
         user = top_users[i]
+        user_lang = await db.get_user_lang(user['user_id'])
         await db.add_coins(user['user_id'], reward)
         name = html_lib.escape(user.get('first_name') or f"User {user['user_id']}")
         mention = f'<a href="tg://user?id={user["user_id"]}">{name}</a>'
@@ -917,35 +1195,25 @@ async def send_weekly_leaderboard(bot):
         try:
             await bot.send_message(
                 user['user_id'],
-                f"🎉 <b>Weekly Leaderboard Prize!</b>\n\n"
-                f"You ranked <b>#{i + 1}</b> on the global collector leaderboard!\n"
-                f"💰 <b>+{reward} coins</b> have been added to your wallet!\n\n"
-                f"Keep collecting to stay on top! 🏆",
+                t(user_lang, 'weekly_dm', rank=i + 1, reward=reward),
                 parse_mode="HTML"
             )
         except Exception:
             pass
 
-    # Build leaderboard text
-    lb_text = (
-        f"╔══════════════════════════╗\n"
-        f"   🏆 <b>WEEKLY LEADERBOARD</b> 🏆\n"
-        f"╚══════════════════════════╝\n\n"
-    )
+    lb_text = t('en', 'weekly_lb_header')
     for i, user in enumerate(top_users):
         medal = medals[i] if i < 3 else f"{i + 1}."
         name = html_lib.escape(user.get('first_name') or f"User {user['user_id']}")
-        mention = f'<a href="tg://user?id={user["user_id"]}">{name}</a>'
+        username_line = f" (@{html_lib.escape(user['username'])})" if user.get('username') else ""
+        mention = f'<a href="tg://user?id={user["user_id"]}">{name}</a>{username_line}'
         lb_text += f"{medal} {mention} — <b>{user['total']}</b> chars\n"
 
-    lb_text += f"\n━━━━━━━━━━━━━━━━\n"
-    lb_text += f"🎊 <b>Weekly Prizes Distributed!</b>\n"
+    lb_text += t('en', 'weekly_lb_prizes')
     for medal, mention, name, uid, reward in prize_lines:
         lb_text += f"{medal} {mention} — <b>+{reward} coins</b>\n"
+    lb_text += t('en', 'weekly_lb_footer', date=now)
 
-    lb_text += f"\n📅 <i>{now}</i> | 💡 <i>Collect more to climb the ranks!</i>"
-
-    # Send to all known groups
     all_groups = await db.get_all_group_ids()
     for group_id in all_groups:
         try:
@@ -977,9 +1245,8 @@ async def start_drop_scheduler(bot):
 # ---------- Bot Command Handlers ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    # Save/update user info on every start
     await db.update_user_info(user.id, user.first_name, user.username)
-    # Referral handling
+    lang = await db.get_user_lang(user.id)
     if context.args and context.args[0].startswith('ref_'):
         try:
             referrer_id = int(context.args[0].split('_')[1])
@@ -990,11 +1257,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await db.add_coins(user.id, 500)
                     try:
                         ref_name = html_lib.escape(user.username or user.first_name)
+                        ref_lang = await db.get_user_lang(referrer_id)
                         await context.bot.send_message(
                             referrer_id,
-                            f"🎉 <b>New Referral!</b>\n"
-                            f"@{ref_name} joined using your link!\n"
-                            f"💰 You earned <b>1000 coins!</b>",
+                            t(ref_lang, 'ref_notify', name=ref_name),
                             parse_mode="HTML"
                         )
                     except Exception:
@@ -1003,116 +1269,120 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
     await db.register_start(user.id)
     video_id = await db.get_start_video()
+    name_display = html_lib.escape(user.first_name or "")
+    uname_display = f" (@{html_lib.escape(user.username)})" if user.username else ""
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("➕ Add To Group", url=f"https://t.me/{context.bot.username}?startgroup=true")],
-        [InlineKeyboardButton("Owner 🤪", url=OWNER_LINK), InlineKeyboardButton("Support chat 💝", url=SUPPORT_LINK)]
+        [InlineKeyboardButton("Owner 🤪", url=OWNER_LINK), InlineKeyboardButton("Support chat 💝", url=SUPPORT_LINK)],
+        [InlineKeyboardButton("Lang 🗽", callback_data="lang:choose")]
     ])
+    welcome_text = f"👋 {name_display}{uname_display}\n\n" + t(lang, 'welcome')
     if video_id:
-        await update.message.reply_video(video_id, caption="Welcome to Anime Character Collector Bot!\nUse /help to see commands.", reply_markup=keyboard)
+        await update.message.reply_video(video_id, caption=welcome_text, reply_markup=keyboard)
     else:
-        await update.message.reply_text("Welcome to Anime Character Collector Bot!\nUse /help to see commands.", reply_markup=keyboard)
+        await update.message.reply_text(welcome_text, reply_markup=keyboard)
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = (
-        "━━━〔 ⚡ HELP PANEL ⚡ 〕━━━\n\n"
+    text = """🎮 *Available Commands*
 
-        "💰 EARN COINS\n"
-        "➤ /daily — Claim coins (every 2h)\n"
-        "➤ /claim — Get random character (every 11h)\n"
-        "➤ /tasks — Complete tasks (DM only)\n"
-        "➤ /refer — Get referral link (DM only)\n\n"
+*💰 Economy*
+/daily - Claim coins (every 2h, per group)
+/claim - Claim random character (every 11h, per group)
+/wallet - Show your coins
 
-        "📦 COLLECTION\n"
-        "➤ /vault — Your characters\n"
-        "➤ /wallet — View coins & stats\n"
-        "➤ /market — Browse store\n"
-        "➤ /buy <id> — Purchase character\n"
-        "➤ /sell <id> — Sell character (70% refund)\n"
-        "➤ /search <name> — Search characters\n\n"
+*📦 Collection*
+/vault - Your collected characters (per group)
+/market - View buyable characters
+/buy <id> [id2 ...] - Buy character(s)
+/sell <id> - Sell character (70% refund)
+/search <n> - Search characters
 
-        "🎭 DROP SYSTEM\n"
-        "➤ /guess <name> — Guess the drop\n\n"
+*🎭 Drop System (Groups)*
+/guess <n> - Guess the dropped character
+/enabledrops - Enable drops (admin/owner)
+/disabledrops - Disable drops (admin/owner)
 
-        "🏆 RANKING\n"
-        "➤ /leaderboard — Top collectors\n\n"
+*🏆 Leaderboard (Groups)*
+/leaderboard - View top global collectors
+_(Auto-posts & pins every Sunday with prizes!)_
 
-        "👥 GROUP ADMIN\n"
-        "➤ /enabledrops — Enable drops\n"
-        "➤ /disabledrops — Disable drops\n"
-        "➤ /listadmins — List admins\n"
-        "➤ /calladmins — Mention all admins\n"
-        "➤ /setwelcomepic — Set welcome image\n\n"
+*📋 Tasks (DM Only)*
+/tasks - View and complete tasks
+/refer - Get your referral link
 
-        "👑 OWNER ONLY\n"
-        "➤ /addcharacter — Add new character\n"
-        "➤ /remove <id> — Remove character\n"
-        "➤ /listchar — List all characters\n"
-        "➤ /addcoins — Add coins (reply to user)\n"
-        "➤ /removecoins — Remove coins (reply to user)\n"
-        "➤ /setstartvid — Set start video\n"
-        "➤ /resetgrpdata — Reset group data ⚠️\n"
-        "➤ /stats — Bot statistics\n"
-        "➤ /groupmembers <id> — View group members\n"
-        "➤ /addtask — Add task\n"
-        "➤ /removetask <id> — Remove task\n"
-        "➤ /listtasks — List all tasks\n\n"
+*👥 Group Admin*
+/listadmins - List human admins
+/calladmins - Mention all admins (10min cooldown)
 
-        "━━━〔 🚀 USE SMARTLY 〕━━━"
-    )
-    await update.message.reply_text(text)
+*👑 Owner/Dev*
+/addcharacter - Add new character (interactive)
+/remove <id> - Remove character
+/listchar - List all characters (IDs)
+/addcoins (reply) - Add coins
+/removecoins (reply) - Remove coins
+/setstartvid (reply to video)
+/setwelcomepic (reply to photo, in group)
+/resetgrpdata - Reset group data (danger)
+/stats - Bot statistics
+/groupmembers <id> - Members of a group
+
+*Other*
+/start - Start the bot
+/help - This menu"""
+    await update.message.reply_text(text, parse_mode="Markdown")
 
 async def daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     group_id = get_effective_group_id(update)
     if not await ensure_started(update, context):
         return
+    lang = await db.get_user_lang(user.id)
     if await db.can_claim_daily(user.id, group_id):
         reward = random.randint(50, 200)
         await db.add_coins(user.id, reward)
         await db.record_daily(user.id, group_id)
         streak = await db.update_daily_streak(user.id, group_id)
         coins = await db.get_user_coins(user.id)
-        streak_text = f"\n🔥 Daily Streak: {streak} days" if streak > 1 else ""
+        streak_text = t(lang, 'daily_streak', streak=streak) if streak > 1 else ""
         if streak >= 7 and streak % 7 == 0:
             await db.add_coins(user.id, 3000)
-            streak_text += "\n🎉 *7-Day Streak Bonus!* +3000 coins!"
+            streak_text += t(lang, 'daily_streak_bonus')
         await update.message.reply_text(
-            f"💸 You claimed *{reward} coins*!\n💰 Total balance: `{coins}` coins{streak_text}",
+            t(lang, 'daily_claimed', reward=reward, coins=coins, streak_text=streak_text),
             parse_mode="Markdown"
         )
     else:
-        await update.message.reply_text("⏳ You already claimed daily coins here. Try again in 2 hours.")
+        await update.message.reply_text(t(lang, 'daily_wait'))
 
 async def claim(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     group_id = get_effective_group_id(update)
     if not await ensure_started(update, context):
         return
+    lang = await db.get_user_lang(user.id)
     if not await db.can_claim_character(user.id, group_id):
-        await update.message.reply_text("⏳ You already claimed a character here. Try again in 11 hours.")
+        await update.message.reply_text(t(lang, 'claim_wait'))
         return
     char = await db.get_random_unowned_character(user.id, group_id)
     if char is None:
         any_char = await db.get_random_character()
         if not any_char:
-            await update.message.reply_text("❌ No characters available. Contact the owner.")
+            await update.message.reply_text(t(lang, 'claim_no_chars'))
             return
         await db.add_coins(user.id, 10000)
         await db.record_claim(user.id, group_id)
         coins = await db.get_user_coins(user.id)
         await update.message.reply_text(
-            "🏆 *You own every character in this group's collection!*\n\n╭───────────────╮\n💰 *Reward:* +10,000 Coins\n"
-            f"👜 *Balance:* {coins:,} Coins\n╰───────────────╯\n\n⏳ Come back in 11 hours for your next claim!",
+            t(lang, 'claim_all_owned', coins=f"{coins:,}"),
             parse_mode="Markdown"
         )
         return
     await db.add_to_inventory(user.id, group_id, char['char_id'])
     await db.record_claim(user.id, group_id)
     emoji = await db.get_rarity_emoji(char['rarity'])
-    caption = (
-        f"{emoji} *{char['name']}*\n╭───────────────╮\n🎬 Anime: {char['anime']}\n💎 Tier: {emoji} {char['rarity']}\n"
-        f"🆔 Card ID: `{char['char_id']}`\n💰 Value: {char['price']:,} Coins\n╰───────────────╯\n\n✨ A rare presence has been claimed…\n"
-        f"🌸 Grace\\. Power\\. Mystery — all in one\\.\n\n🔐 Status: Newly Claimed"
+    caption = t(lang, 'claim_caption',
+        emoji=emoji, name=char['name'], anime=char['anime'],
+        rarity=char['rarity'], char_id=char['char_id'], price=f"{char['price']:,}"
     )
     try:
         await update.message.reply_photo(photo=char['img_url'], caption=caption, parse_mode="MarkdownV2")
@@ -1125,19 +1395,19 @@ async def wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     group_id = get_effective_group_id(update)
     if not await ensure_started(update, context):
         return
+    lang = await db.get_user_lang(user.id)
     coins = await db.get_user_coins(user.id)
     char_count = await db.get_user_char_count(user.id, group_id)
-    text = (
-        f"👤 *{user.first_name}'s Wallet*\n━━━━━━━━━━━━━━━━\n💰 *Coins:* `{coins:,}` _(global)_\n"
-        f"🎴 *Characters here:* `{char_count}`\n━━━━━━━━━━━━━━━━\n_/daily to earn coins • /vault to see collection_"
+    await update.message.reply_text(
+        t(lang, 'wallet_text', name=user.first_name, coins=f"{coins:,}", char_count=char_count),
+        parse_mode="Markdown"
     )
-    await update.message.reply_text(text, parse_mode="Markdown")
 
-async def send_vault_page(target, user_id: int, group_id: int, page: int, send_new: bool = True):
+async def send_vault_page(target, user_id: int, group_id: int, page: int, send_new: bool = True, lang: str = 'en'):
     items, total = await db.get_user_inventory(user_id, group_id, 1, page - 1)
     total_pages = max(1, total)
     if not items:
-        text = "📭 Your vault is empty here. Use /claim or /buy to get characters!"
+        text = t(lang, 'vault_empty')
         if send_new:
             await target.reply_text(text)
         else:
@@ -1145,9 +1415,10 @@ async def send_vault_page(target, user_id: int, group_id: int, page: int, send_n
         return
     char = items[0]
     emoji = await db.get_rarity_emoji(char['rarity'])
-    caption = (
-        f"{emoji} *{char['name']}*\n╭───────────────╮\n🎬 Anime: {char['anime']}\n💎 Tier: {emoji} {char['rarity']}\n"
-        f"🆔 Card ID: `{char['char_id']}`\n💰 Value: {char['price']:,} Coins\n╰───────────────╯\n\n_Card {page} of {total_pages}_"
+    caption = t(lang, 'vault_caption',
+        emoji=emoji, name=char['name'], anime=char['anime'],
+        rarity=char['rarity'], char_id=char['char_id'],
+        price=f"{char['price']:,}", page=page, total=total_pages
     )
     row = []
     if page > 1:
@@ -1175,8 +1446,9 @@ async def vault(update: Update, context: ContextTypes.DEFAULT_TYPE):
     group_id = get_effective_group_id(update)
     if not await ensure_started(update, context):
         return
+    lang = await db.get_user_lang(user.id)
     page = int(context.args[0]) if context.args and context.args[0].isdigit() else 1
-    await send_vault_page(update.message, user.id, group_id, page, send_new=True)
+    await send_vault_page(update.message, user.id, group_id, page, send_new=True, lang=lang)
 
 async def vault_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1186,10 +1458,12 @@ async def vault_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     parts = query.data.split(":")
     user_id, group_id, page = int(parts[1]), int(parts[2]), int(parts[3])
     if update.effective_user.id != user_id:
-        await query.answer("⛔ This is not your vault!", show_alert=True)
+        lang = await db.get_user_lang(update.effective_user.id)
+        await query.answer(t(lang, 'vault_not_yours'), show_alert=True)
         return
     await query.answer()
-    await send_vault_page(query.message, user_id, group_id, page, send_new=False)
+    lang = await db.get_user_lang(user_id)
+    await send_vault_page(query.message, user_id, group_id, page, send_new=False, lang=lang)
 
 async def send_market_page(target, page: int, send_new: bool = True):
     PER_PAGE = 5
@@ -1222,8 +1496,9 @@ async def send_market_page(target, page: int, send_new: bool = True):
         await target.edit_text(text, parse_mode="Markdown", reply_markup=keyboard)
 
 async def market(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    lang = await db.get_user_lang(update.effective_user.id)
     keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🌐 Open Web Store", url=WEB_STORE_URL)]])
-    await update.message.reply_text("🛒 *Character Market*\nBrowse all characters in the web store 👇", parse_mode="Markdown", reply_markup=keyboard)
+    await update.message.reply_text(t(lang, 'market_text'), parse_mode="Markdown", reply_markup=keyboard)
 
 async def market_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1238,8 +1513,9 @@ async def buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
     group_id = get_effective_group_id(update)
     if not await ensure_started(update, context):
         return
+    lang = await db.get_user_lang(user.id)
     if not context.args:
-        await update.message.reply_text("Usage: /buy <character_id> [id2 ...]")
+        await update.message.reply_text(t(lang, 'buy_usage'))
         return
     char_ids = context.args
     bought = []
@@ -1248,16 +1524,16 @@ async def buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for cid in char_ids:
         char = await db.get_character_by_id(cid)
         if not char:
-            failed.append(f"{cid} (not found)")
+            failed.append(t(lang, 'buy_not_found', id=cid))
             continue
         if await db.user_owns_character(user.id, group_id, cid):
-            failed.append(f"{cid} (already owned)")
+            failed.append(t(lang, 'buy_already_owned', id=cid))
             continue
         total_cost += char['price']
         bought.append(char)
     coins = await db.get_user_coins(user.id)
     if total_cost > coins:
-        await update.message.reply_text(f"❌ Insufficient coins. Need {total_cost}, you have {coins}.")
+        await update.message.reply_text(t(lang, 'buy_no_coins', total_cost=total_cost, coins=coins))
         return
     for char in bought:
         await db.remove_coins(user.id, char['price'])
@@ -1265,10 +1541,10 @@ async def buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await db.is_bonus_completed(user.id, 'first_buy'):
         await db.complete_bonus(user.id, 'first_buy')
         await db.add_coins(user.id, 1500)
-        await update.message.reply_text("🎉 *First Buy Bonus!* +1500 coins!", parse_mode="Markdown")
-    msg = f"✅ Bought {len(bought)} character(s).\n"
+        await update.message.reply_text(t(lang, 'buy_first_bonus'), parse_mode="Markdown")
+    msg = t(lang, 'buy_success', count=len(bought))
     if failed:
-        msg += f"⚠️ Failed: {', '.join(failed)}"
+        msg += t(lang, 'buy_failed', items=', '.join(failed))
     await update.message.reply_text(msg)
     await check_collector_bonus(user.id, group_id, update)
 
@@ -1277,33 +1553,35 @@ async def sell(update: Update, context: ContextTypes.DEFAULT_TYPE):
     group_id = get_effective_group_id(update)
     if not await ensure_started(update, context):
         return
+    lang = await db.get_user_lang(user.id)
     if not context.args:
-        await update.message.reply_text("Usage: /sell <character_id>")
+        await update.message.reply_text(t(lang, 'sell_usage'))
         return
     char_id = context.args[0]
     char = await db.get_character_by_id(char_id)
     if not char:
-        await update.message.reply_text("❌ Character not found.")
+        await update.message.reply_text(t(lang, 'sell_not_found'))
         return
     if not await db.user_owns_character(user.id, group_id, char_id):
-        await update.message.reply_text("❌ You don't own this character.")
+        await update.message.reply_text(t(lang, 'sell_not_owned'))
         return
     sell_price = int(char['price'] * 0.7)
     await db.add_coins(user.id, sell_price)
     await db.remove_from_inventory(user.id, group_id, char_id)
     await update.message.reply_text(
-        f"💰 Sold <b>{html_lib.escape(char['name'])}</b> for <b>{sell_price} coins</b> (70% of base).",
+        t(lang, 'sell_success', name=html_lib.escape(char['name']), price=sell_price),
         parse_mode="HTML"
     )
 
 async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    lang = await db.get_user_lang(update.effective_user.id)
     if not context.args:
-        await update.message.reply_text("Usage: /search <character name>")
+        await update.message.reply_text(t(lang, 'search_usage'))
         return
     query = " ".join(context.args)
     results = await db.search_characters(query)
     if not results:
-        await update.message.reply_text("No matching characters.")
+        await update.message.reply_text(t(lang, 'search_no_results'))
         return
     for char in results[:5]:
         emoji = await db.get_rarity_emoji(char['rarity'])
@@ -1315,29 +1593,30 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def guess(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
+    user = update.effective_user
+    lang = await db.get_user_lang(user.id)
     if chat.type not in ["group", "supergroup"]:
-        await update.message.reply_text("🎭 This command only works in groups!")
+        await update.message.reply_text(t(lang, 'guess_groups_only'))
         return
     if not context.args:
-        await update.message.reply_text("Usage: /guess <character name>")
+        await update.message.reply_text(t(lang, 'guess_usage'))
         return
-    user = update.effective_user
     group_id = chat.id
     if not await db.can_guess(user.id, group_id, 10):
-        await update.message.reply_text("⏳ Please wait 10 seconds before guessing again.")
+        await update.message.reply_text(t(lang, 'guess_cooldown'))
         return
     await db.record_guess(user.id, group_id)
     guess_name = " ".join(context.args).lower()
     drop = await db.get_current_drop(group_id)
     if not drop:
-        await update.message.reply_text("❌ No active drop right now. Wait for the next one!")
+        await update.message.reply_text(t(lang, 'guess_no_drop'))
         return
     if drop['winner_id']:
-        await update.message.reply_text("🏆 Someone already guessed this character!")
+        await update.message.reply_text(t(lang, 'guess_already_won'))
         return
     char = await db.get_character_by_id_any(drop['char_id'])
     if not char:
-        await update.message.reply_text("❌ Error loading character data.")
+        await update.message.reply_text(t(lang, 'guess_error'))
         return
     char_name = char['name'].lower()
     char_first = char_name.split()[0]
@@ -1347,21 +1626,21 @@ async def guess(update: Update, context: ContextTypes.DEFAULT_TYPE):
         already_owned = await db.user_owns_character(user.id, group_id, char['char_id'])
         if already_owned:
             reward = 5000
-            reward_text = "💰 You already own this character, so you get 5000 coins instead!"
+            reward_text = t(lang, 'guess_already_own')
         else:
             reward = 500
             await db.add_to_inventory(user.id, group_id, char['char_id'])
-            reward_text = f"🎴 {html_lib.escape(char['name'])} added to your vault!"
+            reward_text = t(lang, 'guess_added', name=html_lib.escape(char['name']))
         await db.add_coins(user.id, reward)
         try:
             await context.bot.unpin_chat_message(group_id, drop['message_id'])
         except Exception:
             pass
         mention = f'<a href="tg://user?id={user.id}">{html_lib.escape(user.first_name)}</a>'
-        streak_text = f"\n🔥 x{streak} Streak!" if streak >= 3 else ""
+        streak_text = t(lang, 'guess_streak', streak=streak) if streak >= 3 else ""
         await update.message.reply_text(
-            f"✨ <b>CORRECT!</b> {mention} guessed <b>{html_lib.escape(char['name'])}</b>!{streak_text}\n\n"
-            f"💰 Reward: +{reward} coins\n{reward_text}",
+            t(lang, 'guess_correct', mention=mention, name=html_lib.escape(char['name']),
+              streak_text=streak_text, reward=reward, reward_text=reward_text),
             parse_mode="HTML"
         )
         if streak >= 3:
@@ -1369,7 +1648,7 @@ async def guess(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 streak_name = user.username or user.first_name
                 streak_msg = await context.bot.send_message(
                     group_id,
-                    f"🔥 <b>@{html_lib.escape(streak_name)} x{streak} streak!</b> 🔥",
+                    t(lang, 'streak_msg', name=html_lib.escape(streak_name), streak=streak),
                     parse_mode="HTML"
                 )
                 await context.bot.pin_chat_message(group_id, streak_msg.message_id)
@@ -1379,16 +1658,17 @@ async def guess(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not await db.is_bonus_completed(user.id, 'first_guess'):
             await db.complete_bonus(user.id, 'first_guess')
             await db.add_coins(user.id, 1000)
-            await update.message.reply_text("🎉 <b>First Guess Win Bonus!</b> +1000 coins!", parse_mode="HTML")
+            await update.message.reply_text(t(lang, 'guess_first_bonus'), parse_mode="HTML")
         await check_collector_bonus(user.id, group_id, update)
     else:
-        await update.message.reply_text("❌ Wrong guess! Try again!")
+        await update.message.reply_text(t(lang, 'guess_wrong'))
 
 async def enabledrops(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     user = update.effective_user
+    lang = await db.get_user_lang(user.id)
     if chat.type not in ["group", "supergroup"]:
-        await update.message.reply_text("This command only works in groups!")
+        await update.message.reply_text(t(lang, 'drops_groups_only'))
         return
     is_admin = is_owner(user.id)
     if not is_admin:
@@ -1398,19 +1678,17 @@ async def enabledrops(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
     if not is_admin:
-        await update.message.reply_text("⛔ Only group admins or the bot owner can enable drops.")
+        await update.message.reply_text(t(lang, 'drops_enable_admin'))
         return
     await db.enable_drops(chat.id)
-    await update.message.reply_text(
-        "🎭 *Drops Enabled!*\n\nCharacters will now drop every hour.\nUse /guess <n> to guess the character!",
-        parse_mode="Markdown"
-    )
+    await update.message.reply_text(t(lang, 'drops_enabled'), parse_mode="Markdown")
 
 async def disabledrops(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     user = update.effective_user
+    lang = await db.get_user_lang(user.id)
     if chat.type not in ["group", "supergroup"]:
-        await update.message.reply_text("This command only works in groups!")
+        await update.message.reply_text(t(lang, 'drops_groups_only'))
         return
     is_admin = is_owner(user.id)
     if not is_admin:
@@ -1420,66 +1698,64 @@ async def disabledrops(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
     if not is_admin:
-        await update.message.reply_text("⛔ Only group admins or the bot owner can disable drops.")
+        await update.message.reply_text(t(lang, 'drops_disable_admin'))
         return
     await db.disable_drops(chat.id)
-    await update.message.reply_text(
-        "🚫 *Drops Disabled!*\n\nNo more automatic drops in this group.",
-        parse_mode="Markdown"
-    )
+    await update.message.reply_text(t(lang, 'drops_disabled'), parse_mode="Markdown")
 
 async def tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     user = update.effective_user
     if chat.type != "private":
-        await update.message.reply_text("📋 Please use /tasks in DM (private chat) with me!")
+        lang = await db.get_user_lang(user.id)
+        await update.message.reply_text(t(lang, 'tasks_dm_only'))
         return
     if not await ensure_started(update, context):
         return
+    lang = await db.get_user_lang(user.id)
     ref_count, ref_earned = await db.get_referral_stats(user.id)
-    # Use global queries so DM always shows real data
     streak = await db.get_daily_streak_global(user.id)
     char_count = await db.get_user_char_count_global(user.id)
-    # HTML mode prevents task descriptions from breaking the message
-    text = (
-        f"📋 <b>Your Tasks</b>\n━━━━━━━━━━━━━━━━\n\n"
-        f"📨 <b>Referral Task</b>\n"
-        f"   ✅ Refer friends and earn!\n"
-        f"   📊 Referred: {ref_count} users | Earned: {ref_earned} coins\n"
-        f"   💰 Reward: 1000 coins per referral\n\n"
-    )
+    # Auto-complete collector bonus if eligible
+    if not await db.is_bonus_completed(user.id, 'collector') and char_count >= 10:
+        await db.complete_bonus(user.id, 'collector')
+        await db.add_coins(user.id, 2500)
+    text = t(lang, 'tasks_header')
+    text += t(lang, 'tasks_referral', ref_count=ref_count, ref_earned=ref_earned)
     channel_tasks = await db.get_tasks("channel")
-    text += "📢 <b>Channel Join Tasks</b>\n"
+    text += t(lang, 'tasks_channel_header')
     if channel_tasks:
-        for t in channel_tasks:
-            completed = await db.is_task_completed(user.id, t['task_id'])
-            status = "✅ Completed" if completed else "⏳ Pending"
-            safe_desc = html_lib.escape(t['description'])
-            text += f"   {status}: {safe_desc} (+{t['reward']} coins)\n"
+        for task in channel_tasks:
+            completed = await db.is_task_completed(user.id, task['task_id'])
+            status = "✅" if completed else "⏳"
+            safe_desc = html_lib.escape(task['description'])
+            text += f"   {status} {safe_desc} (+{task['reward']} coins)\n"
     else:
-        text += "   No channel tasks available\n"
-    text += "\n➕ <b>Add Bot to Group</b>\n   ⏳ Add me to a group as admin (+5000 coins)\n\n🎁 <b>Bonus Tasks</b>\n"
+        text += t(lang, 'tasks_no_channel')
+    text += t(lang, 'tasks_group_add')
+    text += t(lang, 'tasks_bonus_header')
     streak_status = "✅" if streak >= 7 else "⏳"
-    text += f"   {streak_status} 7-Day Streak ({streak}/7) (+3000 coins)\n"
+    text += t(lang, 'tasks_streak', status=streak_status, streak=streak)
     first_buy = await db.is_bonus_completed(user.id, 'first_buy')
-    text += f"   {'✅' if first_buy else '⏳'} First Buy (+1500 coins)\n"
+    text += t(lang, 'tasks_first_buy', status="✅" if first_buy else "⏳")
     collector_done = await db.is_bonus_completed(user.id, 'collector')
-    text += f"   {'✅' if collector_done else '⏳'} Collector ({char_count}/10 chars) (+2500 coins)\n"
+    text += t(lang, 'tasks_collector', status="✅" if collector_done else "⏳", count=char_count)
     first_guess = await db.is_bonus_completed(user.id, 'first_guess')
-    text += f"   {'✅' if first_guess else '⏳'} First Guess Win (+1000 coins)\n"
+    text += t(lang, 'tasks_first_guess', status="✅" if first_guess else "⏳")
     buttons = []
-    for t in channel_tasks:
-        if not await db.is_task_completed(user.id, t['task_id']):
-            label = t['description'][:30]
-            if len(t['description']) > 30:
+    for task in channel_tasks:
+        if not await db.is_task_completed(user.id, task['task_id']):
+            label = task['description'][:30]
+            if len(task['description']) > 30:
                 label += "..."
-            buttons.append([InlineKeyboardButton(f"✅ Done: {label}", callback_data=f"task:{t['task_id']}")])
+            buttons.append([InlineKeyboardButton(t(lang, 'tasks_done_btn', label=label), callback_data=f"task:{task['task_id']}")])
     keyboard = InlineKeyboardMarkup(buttons) if buttons else None
     await update.message.reply_text(text, parse_mode="HTML", reply_markup=keyboard)
 
 async def tasks_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user = update.effective_user
+    lang = await db.get_user_lang(user.id)
     await query.answer()
     if not query.data.startswith("task:"):
         return
@@ -1489,7 +1765,7 @@ async def tasks_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("❌ Task not found.")
         return
     if await db.is_task_completed(user.id, task_id):
-        await query.answer("✅ You already completed this task!", show_alert=True)
+        await query.answer(t(lang, 'tasks_already_done'), show_alert=True)
         return
     try:
         channel = task['target']
@@ -1504,64 +1780,51 @@ async def tasks_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await db.add_coins(user.id, task['reward'])
             safe_desc = html_lib.escape(task['description'])
             await query.edit_message_text(
-                f"🎉 <b>Task Complete!</b>\n\n✅ Joined {safe_desc}\n💰 Reward: +{task['reward']} coins!",
+                t(lang, 'tasks_complete', desc=safe_desc, reward=task['reward']),
                 parse_mode="HTML"
             )
         else:
-            await query.answer("❌ You haven't joined the channel yet!", show_alert=True)
+            await query.answer(t(lang, 'tasks_not_joined'), show_alert=True)
     except Exception:
-        await query.answer("❌ Error verifying membership. Make sure the bot is admin in the channel!", show_alert=True)
+        await query.answer(t(lang, 'tasks_verify_error'), show_alert=True)
 
 async def refer(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     user = update.effective_user
+    lang = await db.get_user_lang(user.id)
     if chat.type != "private":
-        await update.message.reply_text("📨 Please use /refer in DM with me!")
+        await update.message.reply_text(t(lang, 'refer_dm_only'))
         return
     if not await ensure_started(update, context):
         return
     ref_link = f"https://t.me/{context.bot.username}?start=ref_{user.id}"
     ref_count, ref_earned = await db.get_referral_stats(user.id)
-    # HTML mode — the ref link contains underscores that break Markdown v1
-    text = (
-        f"📨 <b>Your Referral Link</b>\n━━━━━━━━━━━━━━━━\n\n"
-        f"🔗 <code>{html_lib.escape(ref_link)}</code>\n\n"
-        f"📊 <b>Stats:</b>\n"
-        f"   👥 Referred: {ref_count} users\n"
-        f"   💰 Total earned: {ref_earned} coins\n\n"
-        f"💡 Share this link with friends!\n"
-        f"   • You get 1000 coins per referral\n"
-        f"   • They get 500 coins for joining"
+    await update.message.reply_text(
+        t(lang, 'refer_text', link=html_lib.escape(ref_link), ref_count=ref_count, ref_earned=ref_earned),
+        parse_mode="HTML"
     )
-    await update.message.reply_text(text, parse_mode="HTML")
 
 async def leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
+    user = update.effective_user
+    lang = await db.get_user_lang(user.id)
     if chat.type not in ["group", "supergroup"]:
-        await update.message.reply_text("🏆 This command only works in groups!")
+        await update.message.reply_text(t(lang, 'lb_groups_only'))
         return
     top_users = await db.get_leaderboard_data(limit=10)
     if not top_users:
-        await update.message.reply_text("No collectors yet! Start collecting with /claim or /buy!")
+        await update.message.reply_text(t(lang, 'lb_empty'))
         return
     medals = ["🥇", "🥈", "🥉"]
     now = datetime.utcnow().strftime("%B %d, %Y")
-    text = (
-        f"╔══════════════════════════╗\n"
-        f"   🏆 <b>GLOBAL LEADERBOARD</b> 🏆\n"
-        f"╚══════════════════════════╝\n\n"
-    )
-    for i, user in enumerate(top_users):
+    text = t(lang, 'lb_header')
+    for i, u in enumerate(top_users):
         medal = medals[i] if i < 3 else f"{i + 1}."
-        name = html_lib.escape(user.get('first_name') or f"User {user['user_id']}")
-        mention = f'<a href="tg://user?id={user["user_id"]}">{name}</a>'
-        text += f"{medal} {mention} — <b>{user['total']}</b> chars\n"
-    text += (
-        f"\n━━━━━━━━━━━━━━━━\n"
-        f"📅 <i>{now}</i>\n"
-        f"🎁 <i>Top 3 earn weekly prizes every Sunday!</i>\n"
-        f"💡 <i>Use /claim and /buy to collect more!</i>"
-    )
+        name = html_lib.escape(u.get('first_name') or f"User {u['user_id']}")
+        username_line = f" (@{html_lib.escape(u['username'])})" if u.get('username') else ""
+        mention = f'<a href="tg://user?id={u["user_id"]}">{name}</a>{username_line}'
+        text += f"{medal} {mention} — <b>{u['total']}</b> chars\n"
+    text += t(lang, 'lb_footer', date=now)
     await update.message.reply_text(text, parse_mode="HTML")
 
 # ---------- Owner/Dev Commands ----------
@@ -1855,35 +2118,37 @@ async def listtasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def listadmins(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
+    lang = await db.get_user_lang(update.effective_user.id)
     if chat.type not in ["group", "supergroup"]:
-        await update.message.reply_text("This command only works in groups.")
+        await update.message.reply_text(t(lang, 'admins_groups_only'))
         return
     admins = await chat.get_administrators()
     human_admins = [a.user for a in admins if not a.user.is_bot]
     if not human_admins:
-        await update.message.reply_text("No human admins found.")
+        await update.message.reply_text(t(lang, 'admins_none'))
         return
-    text = "👥 <b>Human Admins</b>\n" + "\n".join(
+    text = t(lang, 'admins_header') + "\n".join(
         f"• <a href='tg://user?id={a.id}'>{html_lib.escape(a.full_name)}</a>" for a in human_admins
     )
     await update.message.reply_text(text, parse_mode="HTML")
 
 async def calladmins(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
+    lang = await db.get_user_lang(update.effective_user.id)
     if chat.type not in ["group", "supergroup"]:
-        await update.message.reply_text("Only in groups.")
+        await update.message.reply_text(t(lang, 'calladmins_groups_only'))
         return
     last = await db.get_last_calladmins(chat.id)
     if last and (datetime.utcnow() - last).total_seconds() < 600:
-        await update.message.reply_text("⏳ Rate limit: once per 10 minutes per group.")
+        await update.message.reply_text(t(lang, 'calladmins_cooldown'))
         return
     admins = await chat.get_administrators()
     human_admins = [a.user for a in admins if not a.user.is_bot]
     if not human_admins:
-        await update.message.reply_text("No human admins to call.")
+        await update.message.reply_text(t(lang, 'calladmins_none'))
         return
     mentions = [f'<a href="tg://user?id={a.id}">.</a>' for a in human_admins]
-    text = "Hey admins come fast 🙃\n" + "".join(mentions)
+    text = t(lang, 'calladmins_text') + "".join(mentions)
     await update.message.reply_text(text, parse_mode="HTML")
     await db.update_calladmins_time(chat.id)
 
@@ -1894,17 +2159,10 @@ async def welcome_new_members(update: Update, context: ContextTypes.DEFAULT_TYPE
     for member in update.message.new_chat_members:
         if member.is_bot:
             continue
-        # Save user info when they join
         await db.update_user_info(member.id, member.first_name, member.username)
+        lang = await db.get_user_lang(member.id)
         mention = f'<a href="tg://user?id={member.id}">{html_lib.escape(member.first_name)}</a>'
-        welcome_text = (
-            f"👋 Welcome to <b>{html_lib.escape(chat.title)}</b>, {mention}!\n"
-            f"━━━━━━━━━━━━━━━━\n"
-            f"🎮 Use /start to begin your adventure\n"
-            f"💰 Claim daily coins with /daily\n"
-            f"🎴 Get your first character with /claim\n"
-            f"🛒 Browse the /market for more!"
-        )
+        welcome_text = t(lang, 'welcome_member', group=html_lib.escape(chat.title), mention=mention)
         welcome_img = await db.get_group_welcome_img(chat.id)
         if welcome_img:
             await update.message.reply_photo(welcome_img, caption=welcome_text, parse_mode="HTML")
@@ -1919,18 +2177,16 @@ async def bot_added_to_group(update: Update, context: ContextTypes.DEFAULT_TYPE)
         adder_id = chat_member.from_user.id
         group_id = chat_member.chat.id
         group_title = chat_member.chat.title or str(group_id)
-        # Save group title for stats
         await db.update_group_title(group_id, group_title)
         await db.record_group_add(adder_id, group_id)
         if not await db.is_group_add_rewarded(group_id):
             await db.reward_group_add(adder_id, group_id)
             await db.add_coins(adder_id, 5000)
             try:
+                adder_lang = await db.get_user_lang(adder_id)
                 await context.bot.send_message(
                     adder_id,
-                    f"🎉 <b>Thanks for adding me to {html_lib.escape(group_title)}!</b>\n\n"
-                    f"💰 You earned <b>5000 coins!</b>\n"
-                    f"Use /tasks to see more ways to earn!",
+                    t(adder_lang, 'bot_added_thanks', group=html_lib.escape(group_title)),
                     parse_mode="HTML"
                 )
             except Exception:
@@ -1938,15 +2194,50 @@ async def bot_added_to_group(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 # ---------- Global Error Handler ----------
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-    """Log all exceptions to console and reply to user so they're never left hanging."""
     import traceback
     tb = "".join(traceback.format_exception(None, context.error, context.error.__traceback__))
     print(f"[ERROR] Exception while handling update:\n{tb}")
     if isinstance(update, Update) and update.message:
         try:
-            await update.message.reply_text("⚠️ An error occurred. Please try again.")
+            lang = 'en'
+            if update.effective_user:
+                lang = await db.get_user_lang(update.effective_user.id)
+            await update.message.reply_text(t(lang, 'error'))
         except Exception:
             pass
+
+# ---------- Language Command ----------
+async def lang_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    lang = await db.get_user_lang(user.id)
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🇬🇧 English", callback_data="setlang:en"),
+            InlineKeyboardButton("🇷🇺 Русский", callback_data="setlang:ru"),
+        ]
+    ])
+    await update.message.reply_text(t(lang, 'lang_choose'), reply_markup=keyboard)
+
+async def lang_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user = update.effective_user
+    await query.answer()
+    if query.data == "lang:choose":
+        lang = await db.get_user_lang(user.id)
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("🇬🇧 English", callback_data="setlang:en"),
+                InlineKeyboardButton("🇷🇺 Русский", callback_data="setlang:ru"),
+            ]
+        ])
+        await query.message.reply_text(t(lang, 'lang_choose'), reply_markup=keyboard)
+        return
+    chosen = query.data.split(":")[1]
+    if chosen not in ('en', 'ru'):
+        return
+    await db.set_user_lang(user.id, chosen)
+    confirm_key = f'lang_set_{chosen}'
+    await query.edit_message_text(t(chosen, confirm_key))
 
 # ---------- Web Preview (FastAPI) ----------
 HTML_TEMPLATE = """
@@ -2306,6 +2597,8 @@ async def run_bot():
     # User commands
     bot_application.add_handler(CommandHandler("start", start))
     bot_application.add_handler(CommandHandler("help", help_command))
+    bot_application.add_handler(CommandHandler("lang", lang_command))
+    bot_application.add_handler(CallbackQueryHandler(lang_callback, pattern=r'^(lang:|setlang:)'))
     bot_application.add_handler(CommandHandler("daily", daily))
     bot_application.add_handler(CommandHandler("claim", claim))
     bot_application.add_handler(CommandHandler("wallet", wallet))
