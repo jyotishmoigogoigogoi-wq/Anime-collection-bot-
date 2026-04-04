@@ -52,6 +52,53 @@ NAME, ANIME, IMG_URL, RARITY, PRICE = range(5)
 scheduler = AsyncIOScheduler()
 bot_application = None
 
+# ---------- Rarity System ----------
+RARITY_WEIGHTS = {
+    'Common': 40,
+    'Uncommon': 25,
+    'Elite': 15,
+    'Epic': 8,
+    'Waifu': 4,
+    'Special Edition': 3,
+    'Legendary': 2,
+    'Limited': 1.5,
+    'Event': 1,
+    'Mythic': 0.5,
+}
+
+RARITY_COINS = {
+    'Common': 50,
+    'Uncommon': 100,
+    'Elite': 200,
+    'Epic': 400,
+    'Waifu': 500,
+    'Special Edition': 700,
+    'Legendary': 1000,
+    'Limited': 1200,
+    'Event': 1500,
+    'Mythic': 2500,
+}
+
+def get_rarity_bonus(rarity: str) -> int:
+    return RARITY_COINS.get(rarity, 50)
+
+def format_time_delta(seconds: float) -> str:
+    """Convert seconds into human-readable countdown like 1h 23m 45s"""
+    seconds = int(seconds)
+    if seconds <= 0:
+        return "0s"
+    h = seconds // 3600
+    m = (seconds % 3600) // 60
+    s = seconds % 60
+    parts = []
+    if h:
+        parts.append(f"{h}h")
+    if m:
+        parts.append(f"{m}m")
+    if s or not parts:
+        parts.append(f"{s}s")
+    return " ".join(parts)
+
 # ---------- Language Strings ----------
 STRINGS: Dict[str, Dict[str, Any]] = {
     'en': {
@@ -60,14 +107,15 @@ STRINGS: Dict[str, Dict[str, Any]] = {
         'daily_claimed': "💸 You claimed *{reward} coins*!\n💰 Total balance: `{coins}` coins{streak_text}",
         'daily_streak': "\n🔥 Daily Streak: {streak} days",
         'daily_streak_bonus': "\n🎉 *7-Day Streak Bonus!* +3000 coins!",
-        'daily_wait': "⏳ You already claimed daily coins here. Try again in 2 hours.",
-        'claim_wait': "⏳ You already claimed a character here. Try again in 11 hours.",
+        'daily_wait': "⏳ Already claimed here. Next daily in *{time}*.",
+        'claim_wait': "⏳ Already claimed here. Next claim in *{time}*.",
         'claim_no_chars': "❌ No characters available. Contact the owner.",
         'claim_all_owned': (
             "🏆 *You own every character in this group's collection!*\n\n╭───────────────╮\n"
             "💰 *Reward:* +10,000 Coins\n👜 *Balance:* {coins} Coins\n╰───────────────╯\n\n"
             "⏳ Come back in 11 hours for your next claim!"
         ),
+        'claim_rarity_bonus': "✨ *{rarity} Rarity Bonus!* +{bonus} coins!",
         'claim_caption': (
             "{emoji} *{name}*\n╭───────────────╮\n🎬 Anime: {anime}\n💎 Tier: {emoji} {rarity}\n"
             "🆔 Card ID: `{char_id}`\n💰 Value: {price} Coins\n╰───────────────╯\n\n"
@@ -104,8 +152,8 @@ STRINGS: Dict[str, Dict[str, Any]] = {
         'guess_already_won': "🏆 Someone already guessed this character!",
         'guess_error': "❌ Error loading character data.",
         'guess_correct': "✨ <b>CORRECT!</b> {mention} guessed <b>{name}</b>!{streak_text}\n\n💰 Reward: +{reward} coins\n{reward_text}",
-        'guess_already_own': "💰 You already own this character, so you get 5000 coins instead!",
-        'guess_added': "🎴 {name} added to your vault!",
+        'guess_already_own': "💰 Already owned! You get *{coins}* coins instead! ({rarity} × 2)",
+        'guess_added': "🎴 {name} added to your vault! +{coins} bonus coins!",
         'guess_wrong': "❌ Wrong guess! Try again!",
         'guess_streak': "\n🔥 x{streak} Streak!",
         'guess_first_bonus': "🎉 <b>First Guess Win Bonus!</b> +1000 coins!",
@@ -190,14 +238,15 @@ STRINGS: Dict[str, Dict[str, Any]] = {
         'daily_claimed': "💸 Вы получили *{reward} монет*!\n💰 Баланс: `{coins}` монет{streak_text}",
         'daily_streak': "\n🔥 Серия: {streak} дней",
         'daily_streak_bonus': "\n🎉 *Бонус за 7 дней подряд!* +3000 монет!",
-        'daily_wait': "⏳ Вы уже получили ежедневные монеты. Попробуйте через 2 часа.",
-        'claim_wait': "⏳ Вы уже забрали персонажа. Попробуйте через 11 часов.",
+        'daily_wait': "⏳ Уже получено. Следующий ежедневный через *{time}*.",
+        'claim_wait': "⏳ Уже получено. Следующий персонаж через *{time}*.",
         'claim_no_chars': "❌ Персонажи недоступны. Обратитесь к владельцу.",
         'claim_all_owned': (
             "🏆 *Вы владеете всеми персонажами коллекции этой группы!*\n\n╭───────────────╮\n"
             "💰 *Награда:* +10,000 Монет\n👜 *Баланс:* {coins} Монет\n╰───────────────╯\n\n"
             "⏳ Возвращайтесь через 11 часов за следующим персонажем!"
         ),
+        'claim_rarity_bonus': "✨ *Бонус редкости {rarity}!* +{bonus} монет!",
         'claim_caption': (
             "{emoji} *{name}*\n╭───────────────╮\n🎬 Аниме: {anime}\n💎 Уровень: {emoji} {rarity}\n"
             "🆔 ID Карты: `{char_id}`\n💰 Стоимость: {price} Монет\n╰───────────────╯\n\n"
@@ -234,8 +283,8 @@ STRINGS: Dict[str, Dict[str, Any]] = {
         'guess_already_won': "🏆 Кто-то уже угадал этого персонажа!",
         'guess_error': "❌ Ошибка загрузки данных персонажа.",
         'guess_correct': "✨ <b>ПРАВИЛЬНО!</b> {mention} угадал <b>{name}</b>!{streak_text}\n\n💰 Награда: +{reward} монет\n{reward_text}",
-        'guess_already_own': "💰 Вы уже владеете этим персонажем — получаете 5000 монет!",
-        'guess_added': "🎴 {name} добавлен в ваше хранилище!",
+        'guess_already_own': "💰 Уже в коллекции! Вы получаете *{coins}* монет! ({rarity} × 2)",
+        'guess_added': "🎴 {name} добавлен в хранилище! +{coins} бонусных монет!",
         'guess_wrong': "❌ Неверно! Попробуйте ещё раз!",
         'guess_streak': "\n🔥 x{streak} Серия!",
         'guess_first_bonus': "🎉 <b>Бонус за первое угадывание!</b> +1000 монет!",
@@ -602,6 +651,30 @@ class Database:
                 return True
             return (datetime.utcnow() - last).total_seconds() >= 7200
 
+    async def get_daily_cooldown_remaining(self, user_id: int, group_id: int) -> float:
+        """Returns seconds remaining until next daily claim. 0 if ready."""
+        async with self.pool.acquire() as conn:
+            last = await conn.fetchval(
+                'SELECT last_daily FROM group_user_data WHERE user_id = $1 AND group_id = $2',
+                user_id, group_id
+            )
+            if not last:
+                return 0
+            elapsed = (datetime.utcnow() - last).total_seconds()
+            return max(0, 7200 - elapsed)
+
+    async def get_claim_cooldown_remaining(self, user_id: int, group_id: int) -> float:
+        """Returns seconds remaining until next character claim. 0 if ready."""
+        async with self.pool.acquire() as conn:
+            last = await conn.fetchval(
+                'SELECT last_claim FROM group_user_data WHERE user_id = $1 AND group_id = $2',
+                user_id, group_id
+            )
+            if not last:
+                return 0
+            elapsed = (datetime.utcnow() - last).total_seconds()
+            return max(0, 39600 - elapsed)
+
     async def record_daily(self, user_id: int, group_id: int):
         async with self.pool.acquire() as conn:
             await conn.execute('''
@@ -721,19 +794,28 @@ class Database:
             return [dict(r) for r in rows]
 
     async def get_random_character(self) -> Optional[dict]:
+        """Pick a weighted-random available character based on rarity drop rates."""
         async with self.pool.acquire() as conn:
-            row = await conn.fetchrow('SELECT * FROM characters WHERE is_available = true ORDER BY RANDOM() LIMIT 1')
-            return dict(row) if row else None
+            rows = await conn.fetch('SELECT * FROM characters WHERE is_available = true')
+        if not rows:
+            return None
+        chars = [dict(r) for r in rows]
+        weights = [RARITY_WEIGHTS.get(c['rarity'], 1) for c in chars]
+        return random.choices(chars, weights=weights, k=1)[0]
 
     async def get_random_unowned_character(self, user_id: int, group_id: int) -> Optional[dict]:
+        """Pick a weighted-random character this user doesn't own in this group."""
         async with self.pool.acquire() as conn:
-            row = await conn.fetchrow('''
+            rows = await conn.fetch('''
                 SELECT * FROM characters
                 WHERE is_available = true
                 AND char_id NOT IN (SELECT char_id FROM inventory WHERE user_id = $1 AND group_id = $2)
-                ORDER BY RANDOM() LIMIT 1
             ''', user_id, group_id)
-            return dict(row) if row else None
+        if not rows:
+            return None
+        chars = [dict(r) for r in rows]
+        weights = [RARITY_WEIGHTS.get(c['rarity'], 1) for c in chars]
+        return random.choices(chars, weights=weights, k=1)[0]
 
     # ---------- Inventory ----------
     async def add_to_inventory(self, user_id: int, group_id: int, char_id: str) -> bool:
@@ -1352,7 +1434,11 @@ async def daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
     else:
-        await update.message.reply_text(t(lang, 'daily_wait'))
+        remaining = await db.get_daily_cooldown_remaining(user.id, group_id)
+        await update.message.reply_text(
+            t(lang, 'daily_wait', time=format_time_delta(remaining)),
+            parse_mode="Markdown"
+        )
 
 async def claim(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -1361,7 +1447,11 @@ async def claim(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     lang = await db.get_user_lang(user.id)
     if not await db.can_claim_character(user.id, group_id):
-        await update.message.reply_text(t(lang, 'claim_wait'))
+        remaining = await db.get_claim_cooldown_remaining(user.id, group_id)
+        await update.message.reply_text(
+            t(lang, 'claim_wait', time=format_time_delta(remaining)),
+            parse_mode="Markdown"
+        )
         return
     char = await db.get_random_unowned_character(user.id, group_id)
     if char is None:
@@ -1379,6 +1469,9 @@ async def claim(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await db.add_to_inventory(user.id, group_id, char['char_id'])
     await db.record_claim(user.id, group_id)
+    # Rarity bonus coins
+    bonus = get_rarity_bonus(char['rarity'])
+    await db.add_coins(user.id, bonus)
     emoji = await db.get_rarity_emoji(char['rarity'])
     caption = t(lang, 'claim_caption',
         emoji=emoji, name=char['name'], anime=char['anime'],
@@ -1388,6 +1481,10 @@ async def claim(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_photo(photo=char['img_url'], caption=caption, parse_mode="MarkdownV2")
     except Exception:
         await update.message.reply_text(caption, parse_mode="MarkdownV2")
+    await update.message.reply_text(
+        t(lang, 'claim_rarity_bonus', rarity=char['rarity'], bonus=bonus),
+        parse_mode="Markdown"
+    )
     await check_collector_bonus(user.id, group_id, update)
 
 async def wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1624,13 +1721,14 @@ async def guess(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await db.set_drop_winner(group_id, user.id)
         streak = await db.update_win_streak(group_id, user.id)
         already_owned = await db.user_owns_character(user.id, group_id, char['char_id'])
+        rarity_bonus = get_rarity_bonus(char['rarity'])
         if already_owned:
-            reward = 5000
-            reward_text = t(lang, 'guess_already_own')
+            reward = rarity_bonus * 2
+            reward_text = t(lang, 'guess_already_own', coins=reward, rarity=char['rarity'])
         else:
-            reward = 500
+            reward = rarity_bonus
             await db.add_to_inventory(user.id, group_id, char['char_id'])
-            reward_text = t(lang, 'guess_added', name=html_lib.escape(char['name']))
+            reward_text = t(lang, 'guess_added', name=html_lib.escape(char['name']), coins=reward)
         await db.add_coins(user.id, reward)
         try:
             await context.bot.unpin_chat_message(group_id, drop['message_id'])
