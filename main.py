@@ -1356,6 +1356,16 @@ async def start_drop_scheduler(bot):
 # ---------- Bot Command Handlers ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+    chat = update.effective_chat
+    if chat.type in ["group", "supergroup"]:
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("▶ Start in DM", url=f"https://t.me/{context.bot.username}?start=true")]
+        ])
+        await update.message.reply_text(
+            f"👋 Hey {user.first_name}!\nPlease start me in DM to register and use all features! 👇",
+            reply_markup=keyboard
+        )
+        return
     await db.update_user_info(user.id, user.first_name, user.username)
     lang = await db.get_user_lang(user.id)
     if context.args and context.args[0].startswith('ref_'):
@@ -1392,7 +1402,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_video(video_id, caption=welcome_text, reply_markup=keyboard)
     else:
         await update.message.reply_text(welcome_text, reply_markup=keyboard)
-
+        
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = """🎮 *Available Commands*
 
