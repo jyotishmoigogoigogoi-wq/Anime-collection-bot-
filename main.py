@@ -8,12 +8,13 @@ from typing import Optional, List, Tuple, Dict, Any
 from dotenv import load_dotenv
 import asyncpg
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup,
     InputMediaPhoto
 )
+from telegram.error import Forbidden, ChatMigrated, BadRequest
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
     MessageHandler, filters, ConversationHandler,
@@ -47,6 +48,9 @@ WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")
 
 # Conversation states
 NAME, ANIME, IMG_URL, RARITY, PRICE = range(5)
+# Dev broadcast states
+BROADCAST_CONTENT = 10
+SETSTARTMSG_CONTENT = 11
 
 # Global scheduler and application reference (used by webhook endpoint)
 scheduler = AsyncIOScheduler()
@@ -160,7 +164,7 @@ STRINGS: Dict[str, Dict[str, Any]] = {
         'streak_msg': "🔥 <b>@{name} x{streak} streak!</b> 🔥",
         'drops_groups_only': "This command only works in groups!",
         'drops_enable_admin': "⛔ Only group admins or the bot owner can enable drops.",
-        'drops_enabled': "🎭 *Drops Enabled!*\n\nCharacters will now drop every hour.\nUse /guess <name> to guess the character!",
+        'drops_enabled': "🎭 *Drops Enabled!*\n\nCharacters will now drop every hour.\nUse /guess <n> to guess the character!",
         'drops_disable_admin': "⛔ Only group admins or the bot owner can disable drops.",
         'drops_disabled': "🚫 *Drops Disabled!*\n\nNo more automatic drops in this group.",
         'drop_guess_caption': "🎭 Guess the character!",
@@ -908,6 +912,18 @@ class Database:
                 'start_video', file_id
             )
 
+    async def get_start_msg(self) -> Optional[str]:
+        """Returns the custom start message caption if set, else None."""
+        async with self.pool.acquire() as conn:
+            return await conn.fetchval('SELECT value FROM bot_config WHERE key = $1', 'start_msg')
+
+    async def set_start_msg(self, msg: str):
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                'INSERT INTO bot_config (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = $2',
+                'start_msg', msg
+            )
+
     async def get_rarity_emoji(self, rarity: str) -> str:
         async with self.pool.acquire() as conn:
             emoji = await conn.fetchval('SELECT emoji FROM rarity_ranking WHERE rarity = $1', rarity)
@@ -1155,6 +1171,12 @@ class Database:
             ''')
             return [dict(r) for r in rows]
 
+    async def get_all_started_user_ids(self) -> List[int]:
+        """Returns all user IDs that have started the bot — used for broadcast."""
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch('SELECT user_id FROM started_users')
+            return [r['user_id'] for r in rows]
+
     async def get_total_characters(self) -> int:
         async with self.pool.acquire() as conn:
             return await conn.fetchval('SELECT COUNT(*) FROM characters WHERE is_available = true') or 0
@@ -1244,9 +1266,13 @@ async def perform_drop(bot, group_id: int):
             id=f"expire_{group_id}",
             replace_existing=True
         )
-    except Exception as e:
-        print(f"Drop error in {group_id}: {e}")
+    except (Forbidden, ChatMigrated) as e:
+        # Bot was kicked or chat migrated — auto-disable drops to stop retrying
+        print(f"Drop auto-disabled in {group_id} (bot removed): {e}")
         await db.disable_drops(group_id)
+    except Exception as e:
+        # Transient error (network, rate limit, etc.) — log but DO NOT disable drops
+        print(f"Drop error in {group_id}: {e}")
 
 async def show_drop_hint(bot, group_id: int):
     drop = await db.get_current_drop(group_id)
@@ -1390,19 +1416,34 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
     await db.register_start(user.id)
     video_id = await db.get_start_video()
-    name_display = html_lib.escape(user.first_name or "")
-    uname_display = f" (@{html_lib.escape(user.username)})" if user.username else ""
+    custom_msg = await db.get_start_msg()
+    name_display = html_lib.escape(user.first_name or "Collector")
+    uname_display = f" · @{html_lib.escape(user.username)}" if user.username else ""
+
+    # Default aesthetic start message — overridden by /setstartmsg
+    default_caption = (
+        f"🎐 <b>ꜱᴏᴜʟ ᴄᴏʟʟᴇᴄᴛᴏʀ</b>\n\n"
+        f"✦ Welcome, <b>{name_display}</b>{uname_display}\n\n"
+        f"<i>Anime souls drift through the void…\n"
+        f"Only the worthy may claim them.</i>\n\n"
+        f"╭───────────────────╮\n"
+        f"🎴  /claim  · Summon a soul\n"
+        f"💰  /daily  · Daily offering\n"
+        f"🛒  /market · Soul bazaar\n"
+        f"╰───────────────────╯"
+    )
+    welcome_text = custom_msg if custom_msg else default_caption
+
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("➕ Add To Group", url=f"https://t.me/{context.bot.username}?startgroup=true")],
         [InlineKeyboardButton("Owner 🤪", url=OWNER_LINK), InlineKeyboardButton("Support chat 💝", url=SUPPORT_LINK)],
         [InlineKeyboardButton("Lang 🗽", callback_data="lang:choose")]
     ])
-    welcome_text = f"👋 {name_display}{uname_display}\n\n" + t(lang, 'welcome')
     if video_id:
-        await update.message.reply_video(video_id, caption=welcome_text, reply_markup=keyboard)
+        await update.message.reply_video(video_id, caption=welcome_text, reply_markup=keyboard, parse_mode="HTML")
     else:
-        await update.message.reply_text(welcome_text, reply_markup=keyboard)
-        
+        await update.message.reply_text(welcome_text, reply_markup=keyboard, parse_mode="HTML")
+
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = """🎮 *Available Commands*
 
@@ -1443,6 +1484,8 @@ _(Auto-posts & pins every Sunday with prizes!)_
 /removecoins (reply) - Remove coins
 /setstartvid (reply to video)
 /setwelcomepic (reply to photo, in group)
+/setstartmsg - Update start message caption
+/broadcast - Broadcast to all users & groups
 /resetgrpdata - Reset group data (danger)
 /stats - Bot statistics
 /groupmembers <id> - Members of a group
@@ -2004,10 +2047,16 @@ async def addcharacter_price(update: Update, context: ContextTypes.DEFAULT_TYPE)
     except ValueError:
         await update.message.reply_text("Price must be a number.")
         return PRICE
-    while True:
-        rand_id = f"#{random.randint(0, 9999):04d}"
-        if not await db.char_id_exists(rand_id):
+    # Fixed: added safety counter to prevent infinite loop if IDs are exhausted
+    rand_id = None
+    for _ in range(200):
+        candidate = f"#{random.randint(0, 9999):04d}"
+        if not await db.char_id_exists(candidate):
+            rand_id = candidate
             break
+    if rand_id is None:
+        await update.message.reply_text("❌ Could not generate a unique ID. Consider expanding the ID range.")
+        return ConversationHandler.END
     await db.add_character(
         rand_id, context.user_data['char_name'], context.user_data['char_anime'],
         context.user_data['char_img'], context.user_data['char_rarity'], price
@@ -2253,6 +2302,160 @@ async def listtasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     await update.message.reply_text(text, parse_mode="HTML")
 
+# ---------- /setstartmsg — Dev only ----------
+async def setstartmsg_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_owner(update.effective_user.id):
+        return ConversationHandler.END
+    await update.message.reply_text(
+        "✏️ <b>Set Start Message</b>\n\n"
+        "Send the new caption for the /start command.\n"
+        "This replaces the default text (video stays the same, buttons stay the same).\n\n"
+        "Send /cancel to abort.",
+        parse_mode="HTML"
+    )
+    return SETSTARTMSG_CONTENT
+
+async def setstartmsg_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_owner(update.effective_user.id):
+        return ConversationHandler.END
+    new_msg = update.message.text
+    await db.set_start_msg(new_msg)
+    await update.message.reply_text(
+        f"✅ Start message updated!\n\nPreview:\n\n{new_msg}"
+    )
+    return ConversationHandler.END
+
+# ---------- /broadcast — Dev only ----------
+async def broadcast_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_owner(update.effective_user.id):
+        return ConversationHandler.END
+    context.user_data.pop('broadcast_msg', None)
+    await update.message.reply_text(
+        "📣 <b>Broadcast Mode</b>\n\n"
+        "Send me the content to broadcast:\n"
+        "• Text message\n"
+        "• Photo\n"
+        "• Photo + caption\n"
+        "• Video\n"
+        "• Video + caption\n\n"
+        "✅ When ready → send <code>/go</code> to broadcast to all users &amp; groups.\n"
+        "❌ To cancel → send <code>/cancelbc</code>",
+        parse_mode="HTML"
+    )
+    return BROADCAST_CONTENT
+
+async def broadcast_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Store the message the dev wants to broadcast."""
+    if not is_owner(update.effective_user.id):
+        return ConversationHandler.END
+    msg = update.message
+    data: Dict[str, Any] = {
+        'text': msg.text or None,
+        'caption': msg.caption or None,
+        'photo': msg.photo[-1].file_id if msg.photo else None,
+        'video': msg.video.file_id if msg.video else None,
+    }
+    context.user_data['broadcast_msg'] = data
+    if data['photo']:
+        kind = "🖼 Photo"
+    elif data['video']:
+        kind = "🎬 Video"
+    else:
+        kind = "📝 Text"
+    await msg.reply_text(
+        f"✅ Content saved ({kind}).\n"
+        "Send another message to replace it, or send /go to start broadcasting."
+    )
+    return BROADCAST_CONTENT
+
+async def _send_broadcast_msg(bot, chat_id: int, data: Dict[str, Any]):
+    """Send one broadcast message to a chat. Returns the sent Message object."""
+    caption = data.get('caption')
+    if data.get('photo'):
+        return await bot.send_photo(chat_id, data['photo'], caption=caption)
+    elif data.get('video'):
+        return await bot.send_video(chat_id, data['video'], caption=caption)
+    elif data.get('text'):
+        return await bot.send_message(chat_id, data['text'])
+    return None
+
+async def broadcast_go(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Send the stored broadcast content to all users and all groups."""
+    if not is_owner(update.effective_user.id):
+        return ConversationHandler.END
+    data = context.user_data.get('broadcast_msg')
+    if not data:
+        await update.message.reply_text("❌ No content stored. Use /broadcast first.")
+        return ConversationHandler.END
+
+    status_msg = await update.message.reply_text("📣 Starting broadcast to users…")
+
+    # --- Broadcast to all started users ---
+    user_ids = await db.get_all_started_user_ids()
+    u_sent, u_failed = 0, 0
+    for uid in user_ids:
+        try:
+            await _send_broadcast_msg(context.bot, uid, data)
+            u_sent += 1
+        except (Forbidden, BadRequest):
+            # User blocked the bot or chat doesn't exist — silent skip
+            u_failed += 1
+        except Exception:
+            u_failed += 1
+        # Respect Telegram rate limit: ~20 msg/sec
+        await asyncio.sleep(0.05)
+
+    try:
+        await status_msg.edit_text(
+            f"✅ Users done: {u_sent} sent · {u_failed} skipped\n📣 Broadcasting to groups…"
+        )
+    except Exception:
+        pass
+
+    # --- Broadcast to all registered groups ---
+    group_ids = await db.get_all_group_ids()
+    g_sent, g_failed, g_pinned = 0, 0, 0
+    for gid in group_ids:
+        try:
+            sent_msg = await _send_broadcast_msg(context.bot, gid, data)
+            g_sent += 1
+            if sent_msg:
+                # Try to pin — succeeds if bot is admin, silently fails otherwise
+                try:
+                    await context.bot.pin_chat_message(gid, sent_msg.message_id)
+                    g_pinned += 1
+                except Exception:
+                    pass
+        except (Forbidden, BadRequest):
+            # Bot kicked or group deleted — silent skip
+            g_failed += 1
+        except Exception:
+            g_failed += 1
+        await asyncio.sleep(0.05)
+
+    context.user_data.pop('broadcast_msg', None)
+    try:
+        await status_msg.edit_text(
+            f"📣 <b>Broadcast Complete!</b>\n\n"
+            f"👤 Users: ✅ {u_sent} sent · ❌ {u_failed} skipped\n"
+            f"🏘 Groups: ✅ {g_sent} sent · ❌ {g_failed} skipped\n"
+            f"📌 Pinned in {g_pinned} groups",
+            parse_mode="HTML"
+        )
+    except Exception:
+        await update.message.reply_text(
+            f"📣 Broadcast done!\nUsers: {u_sent}/{len(user_ids)} · Groups: {g_sent}/{len(group_ids)} · Pinned: {g_pinned}"
+        )
+    return ConversationHandler.END
+
+async def broadcast_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_owner(update.effective_user.id):
+        return ConversationHandler.END
+    context.user_data.pop('broadcast_msg', None)
+    await update.message.reply_text("❌ Broadcast cancelled.")
+    return ConversationHandler.END
+
+# ---------- Group Admin Commands ----------
 async def listadmins(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     lang = await db.get_user_lang(update.effective_user.id)
@@ -2310,24 +2513,29 @@ async def bot_added_to_group(update: Update, context: ContextTypes.DEFAULT_TYPE)
     chat_member = update.chat_member
     if not chat_member:
         return
-    if chat_member.new_chat_member.user.id == context.bot.id and chat_member.new_chat_member.status == CMS.ADMINISTRATOR:
+    new_status = chat_member.new_chat_member.status
+    # Register group whenever bot is added (admin OR regular member)
+    if chat_member.new_chat_member.user.id == context.bot.id and new_status in [CMS.ADMINISTRATOR, CMS.MEMBER]:
         adder_id = chat_member.from_user.id
         group_id = chat_member.chat.id
         group_title = chat_member.chat.title or str(group_id)
+        # Always register the group so it shows up in stats/broadcasts
         await db.update_group_title(group_id, group_title)
-        await db.record_group_add(adder_id, group_id)
-        if not await db.is_group_add_rewarded(group_id):
-            await db.reward_group_add(adder_id, group_id)
-            await db.add_coins(adder_id, 5000)
-            try:
-                adder_lang = await db.get_user_lang(adder_id)
-                await context.bot.send_message(
-                    adder_id,
-                    t(adder_lang, 'bot_added_thanks', group=html_lib.escape(group_title)),
-                    parse_mode="HTML"
-                )
-            except Exception:
-                pass
+        # Only reward coins when bot is added as ADMINISTRATOR
+        if new_status == CMS.ADMINISTRATOR:
+            await db.record_group_add(adder_id, group_id)
+            if not await db.is_group_add_rewarded(group_id):
+                await db.reward_group_add(adder_id, group_id)
+                await db.add_coins(adder_id, 5000)
+                try:
+                    adder_lang = await db.get_user_lang(adder_id)
+                    await context.bot.send_message(
+                        adder_id,
+                        t(adder_lang, 'bot_added_thanks', group=html_lib.escape(group_title)),
+                        parse_mode="HTML"
+                    )
+                except Exception:
+                    pass
 
 # ---------- Global Error Handler ----------
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
@@ -2367,7 +2575,11 @@ async def lang_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 InlineKeyboardButton("🇷🇺 Русский", callback_data="setlang:ru"),
             ]
         ])
-        await query.message.reply_text(t(lang, 'lang_choose'), reply_markup=keyboard)
+        # Fixed: edit the existing message instead of sending a new one
+        try:
+            await query.edit_message_text(t(lang, 'lang_choose'), reply_markup=keyboard)
+        except Exception:
+            await query.message.reply_text(t(lang, 'lang_choose'), reply_markup=keyboard)
         return
     chosen = query.data.split(":")[1]
     if chosen not in ('en', 'ru'):
@@ -2706,6 +2918,15 @@ async def api_characters():
         for c in chars
     ]
 
+@app.get("/health")
+async def health_check():
+    """
+    Health endpoint for Uptime Robot / Render keep-alive.
+    Uptime Robot: set monitor URL to https://your-render-url.onrender.com/health
+    Check interval: every 5 minutes (keeps Render free tier from sleeping).
+    """
+    return JSONResponse({"status": "ok", "timestamp": datetime.utcnow().isoformat()})
+
 @app.post("/webhook")
 async def telegram_webhook(request: Request):
     """Receives Telegram updates when WEBHOOK_URL is set."""
@@ -2763,7 +2984,7 @@ async def run_bot():
     bot_application.add_handler(CommandHandler("listadmins", listadmins))
     bot_application.add_handler(CommandHandler("calladmins", calladmins))
 
-    # Owner commands
+    # Owner commands — addcharacter conversation
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("addcharacter", addcharacter_start)],
         states={
@@ -2776,6 +2997,39 @@ async def run_bot():
         fallbacks=[CommandHandler("cancel", cancel_add)],
     )
     bot_application.add_handler(conv_handler)
+
+    # Owner — /setstartmsg conversation
+    setstartmsg_conv = ConversationHandler(
+        entry_points=[CommandHandler("setstartmsg", setstartmsg_start)],
+        states={
+            SETSTARTMSG_CONTENT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, setstartmsg_receive),
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", cancel_add)],
+    )
+    bot_application.add_handler(setstartmsg_conv)
+
+    # Owner — /broadcast conversation
+    # per_chat=False so owner can run broadcast from any chat (DM, group, etc.)
+    broadcast_conv = ConversationHandler(
+        entry_points=[CommandHandler("broadcast", broadcast_start)],
+        states={
+            BROADCAST_CONTENT: [
+                CommandHandler("go", broadcast_go),
+                CommandHandler("cancelbc", broadcast_cancel),
+                MessageHandler(
+                    (filters.TEXT | filters.PHOTO | filters.VIDEO) & ~filters.COMMAND,
+                    broadcast_receive
+                ),
+            ],
+        },
+        fallbacks=[CommandHandler("cancelbc", broadcast_cancel)],
+        per_user=True,
+        per_chat=False,
+    )
+    bot_application.add_handler(broadcast_conv)
+
     bot_application.add_handler(CommandHandler("remove", remove_character))
     bot_application.add_handler(CommandHandler("listchar", listchar))
     bot_application.add_handler(CommandHandler("addcoins", addcoins))
